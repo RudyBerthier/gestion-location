@@ -1,0 +1,3307 @@
+// backend/index.js - PARTIE 1/6 : Configuration et Authentification
+const express = require('express');
+const mysql = require('mysql2');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const cors = require('cors');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+
+
+const CLIENT_ID = 'bca45e51-55f3-4213-acc8-e698a0e06bf8';
+const CLIENT_SECRET = '271e3e36f197655985677eb6b0ca815359ace234425051eeec15a88b1412d53844247081f83c562a058e4ba7e605b9775d55e1b4371a8a4ef80192cc9d96079d';
+const REDIRECT_URI = 'https://location.berthier-contact.fr/callback';
+
+const app = express();
+const PORT = 4000;
+const JWT_SECRET = '9NN0yd1BoiBPNS6w3ajHcXY3XaQfzKaZ'; // À changer en production
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use('/uploads', express.static('uploads'));
+
+// Configuration de la base de données
+let db;
+function createNewConnection() {
+    db = mysql.createPool({
+        connectionLimit: 10000,
+        host: "127.0.0.1",
+        user: "rudy",
+        password: "lebg",
+        database: "gestion-locative",
+        waitForConnections: true,
+        queueLimit: 0,
+        enableKeepAlive: true,
+        keepAliveInitialDelay: 10000
+    });
+
+    db.on('connection', (connection) => {
+        console.log('New connection established');
+        connection.on('error', (err) => {
+            console.error('Connection error:', err);
+            if (err.code === 'PROTOCOL_CONNECTION_LOST' || err.code === 'ECONNRESET') {
+                console.log('Reconnecting to database...');
+                createNewConnection();
+            } else {
+                throw err;
+            }
+        });
+    });
+
+    db.getConnection((err, connection) => {
+        if (err) {
+            console.error('Error connecting to database:', err);
+            setTimeout(createNewConnection, 2000);
+        } else {
+            console.log('Database connection successful!');
+            connection.release();
+        }
+    });
+}
+
+createNewConnection();
+
+// Middleware d'authentification
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) {
+        return res.status(401).json({ success: false, message: 'Token d\'accès requis' });
+    }
+
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+        if (err) {
+            return res.status(403).json({ success: false, message: 'Token invalide' });
+        }
+        req.user = user;
+        next();
+    });
+};
+
+// Configuration multer pour l'upload de fichiers
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        const uploadDir = 'uploads/';
+        if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir, { recursive: true });
+        }
+        cb(null, uploadDir);
+    },
+    filename: function (req, file, cb) {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, uniqueSuffix + path.extname(file.originalname));
+    }
+});
+
+const upload = multer({ 
+    storage: storage,
+    fileFilter: function (req, file, cb) {
+        const allowedTypes = /jpeg|jpg|png|pdf|doc|docx|xlsx|gif|mp4|mov|avi|webm/;
+        const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+        const mimetype = allowedTypes.test(file.mimetype);
+        
+        if (mimetype && extname) {
+            return cb(null, true);
+        } else {
+            cb(new Error('Seuls les fichiers image, vidéo et documents sont autorisés'));
+        }
+    },
+    limits: { fileSize: 50 * 1024 * 1024 } // 50MB max
+});
+
+// ========================= ROUTES AUTHENTIFICATION =========================
+
+// POST - Inscription
+app.post('/auth/register', async (req, res) => {
+    const { nom, prenom, email, telephone, entreprise, password } = req.body;
+
+    try {
+        // Vérifier si l'email existe déjà
+        db.query('SELECT id FROM utilisateurs WHERE email = ?', [email], async (err, results) => {
+            if (err) {
+                console.error('Erreur vérification email:', err);
+                return res.status(500).json({ success: false, message: 'Erreur serveur' });
+            }
+
+            if (results.length > 0) {
+                return res.status(400).json({ success: false, message: 'Cet email est déjà utilisé' });
+            }
+
+            // Hasher le mot de passe
+            const hashedPassword = await bcrypt.hash(password, 10);
+
+            // Créer l'utilisateur
+            const query = `
+                INSERT INTO utilisateurs (nom, prenom, email, telephone, entreprise, password)
+                VALUES (?, ?, ?, ?, ?, ?)
+            `;
+
+            db.query(query, [nom, prenom, email, telephone || null, entreprise || null, hashedPassword], (err, result) => {
+                if (err) {
+                    console.error('Erreur création utilisateur:', err);
+                    return res.status(500).json({ success: false, message: 'Erreur lors de la création du compte' });
+                }
+
+                // Générer un token JWT
+                const token = jwt.sign(
+                    { userId: result.insertId, email },
+                    JWT_SECRET,
+                    { expiresIn: '7d' }
+                );
+
+                // Retourner les données utilisateur sans le mot de passe
+                const user = {
+                    id: result.insertId,
+                    nom,
+                    prenom,
+                    email,
+                    telephone,
+                    entreprise
+                };
+
+                res.json({
+                    success: true,
+                    message: 'Compte créé avec succès',
+                    user,
+                    token
+                });
+            });
+        });
+    } catch (error) {
+        console.error('Erreur inscription:', error);
+        res.status(500).json({ success: false, message: 'Erreur serveur' });
+    }
+});
+
+// POST - Connexion
+app.post('/auth/login', async (req, res) => {
+    const { email, password, rememberMe } = req.body;
+
+    try {
+        db.query('SELECT * FROM utilisateurs WHERE email = ?', [email], async (err, results) => {
+            if (err) {
+                console.error('Erreur recherche utilisateur:', err);
+                return res.status(500).json({ success: false, message: 'Erreur serveur' });
+            }
+
+            if (results.length === 0) {
+                return res.status(400).json({ success: false, message: 'Email ou mot de passe incorrect' });
+            }
+
+            const user = results[0];
+
+            // Vérifier le mot de passe
+            const isPasswordValid = await bcrypt.compare(password, user.password);
+
+            if (!isPasswordValid) {
+                return res.status(400).json({ success: false, message: 'Email ou mot de passe incorrect' });
+            }
+
+            // Mettre à jour la dernière connexion
+            db.query('UPDATE utilisateurs SET derniere_connexion = CURRENT_TIMESTAMP WHERE id = ?', [user.id]);
+
+            // Générer un token JWT
+            const tokenExpiry = rememberMe ? '30d' : '7d';
+            const token = jwt.sign(
+                { userId: user.id, email: user.email },
+                JWT_SECRET,
+                { expiresIn: tokenExpiry }
+            );
+
+            // Retourner les données utilisateur sans le mot de passe
+            const { password: _, ...userWithoutPassword } = user;
+
+            res.json({
+                success: true,
+                message: 'Connexion réussie',
+                user: userWithoutPassword,
+                token
+            });
+        });
+    } catch (error) {
+        console.error('Erreur connexion:', error);
+        res.status(500).json({ success: false, message: 'Erreur serveur' });
+    }
+});
+
+// GET - Vérifier le token
+app.get('/auth/verify', authenticateToken, (req, res) => {
+    db.query('SELECT * FROM utilisateurs WHERE id = ?', [req.user.userId], (err, results) => {
+        if (err) {
+            console.error('Erreur vérification utilisateur:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+
+        if (results.length === 0) {
+            return res.status(404).json({ success: false, message: 'Utilisateur non trouvé' });
+        }
+
+        const { password, ...userWithoutPassword } = results[0];
+        res.json({ success: true, user: userWithoutPassword });
+    });
+});
+
+// PUT - Mettre à jour le profil
+app.put('/auth/profile', authenticateToken, async (req, res) => {
+    const userId = req.user.userId;
+    const { current_password, new_password, ...updateData } = req.body;
+
+    try {
+        // Si changement de mot de passe
+        if (current_password && new_password) {
+            // Vérifier le mot de passe actuel
+            db.query('SELECT password FROM utilisateurs WHERE id = ?', [userId], async (err, results) => {
+                if (err) {
+                    return res.status(500).json({ success: false, message: 'Erreur serveur' });
+                }
+
+                const isCurrentPasswordValid = await bcrypt.compare(current_password, results[0].password);
+                if (!isCurrentPasswordValid) {
+                    return res.status(400).json({ success: false, message: 'Mot de passe actuel incorrect' });
+                }
+
+                // Hasher le nouveau mot de passe
+                const hashedNewPassword = await bcrypt.hash(new_password, 10);
+                updateData.password = hashedNewPassword;
+                
+                updateUserProfile(userId, updateData, res);
+            });
+        } else {
+            updateUserProfile(userId, updateData, res);
+        }
+    } catch (error) {
+        console.error('Erreur mise à jour profil:', error);
+        res.status(500).json({ success: false, message: 'Erreur serveur' });
+    }
+});
+
+// Fonction helper pour mettre à jour le profil
+const updateUserProfile = (userId, updateData, res) => {
+    const fields = [];
+    const values = [];
+
+    Object.entries(updateData).forEach(([key, value]) => {
+        if (value !== undefined && value !== null) {
+            fields.push(`${key} = ?`);
+            values.push(value);
+        }
+    });
+
+    if (fields.length === 0) {
+        return res.status(400).json({ success: false, message: 'Aucune donnée à mettre à jour' });
+    }
+
+    values.push(userId);
+    const query = `UPDATE utilisateurs SET ${fields.join(', ')} WHERE id = ?`;
+
+    db.query(query, values, (err, result) => {
+        if (err) {
+            console.error('Erreur mise à jour utilisateur:', err);
+            return res.status(500).json({ success: false, message: 'Erreur lors de la mise à jour' });
+        }
+
+        // Récupérer les données utilisateur mises à jour
+        db.query('SELECT * FROM utilisateurs WHERE id = ?', [userId], (err, results) => {
+            if (err) {
+                return res.status(500).json({ success: false, message: 'Erreur serveur' });
+            }
+
+            const { password, ...userWithoutPassword } = results[0];
+            res.json({ 
+                success: true, 
+                message: 'Profil mis à jour avec succès',
+                user: userWithoutPassword 
+            });
+        });
+    });
+};
+
+// ========================= CONFIGURATION GOCARDLESS =========================
+const GOCARDLESS_SECRET_ID = 'bca45e51-55f3-4213-acc8-e698a0e06bf8'; // À récupérer depuis GoCardless portal
+const GOCARDLESS_SECRET_KEY = '271e3e36f197655985677eb6b0ca815359ace234425051eeec15a88b1412d53844247081f83c562a058e4ba7e605b9775d55e1b4371a8a4ef80192cc9d96079d'; // À récupérer depuis GoCardless portal
+const GOCARDLESS_BASE_URL = 'https://bankaccountdata.gocardless.com/api/v2';
+
+// Fonction pour obtenir le token d'accès GoCardless
+const getGoCardlessToken = async () => {
+    try {
+        const response = await fetch(`${GOCARDLESS_BASE_URL}/token/new/`, {
+            method: 'POST',
+            headers: {
+                'accept': 'application/json',
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                secret_id: GOCARDLESS_SECRET_ID,
+                secret_key: GOCARDLESS_SECRET_KEY
+            })
+        });
+
+        const data = await response.json();
+        
+        if (!response.ok) {
+            throw new Error(`GoCardless token error: ${data.detail || response.status}`);
+        }
+
+        return data.access;
+    } catch (error) {
+        console.error('Erreur obtention token GoCardless:', error);
+        throw error;
+    }
+};
+
+// ========================= ROUTES GOCARDLESS =========================
+
+const addCacheColumns = `
+ALTER TABLE utilisateurs 
+ADD COLUMN IF NOT EXISTS gocardless_account_details JSON,
+ADD COLUMN IF NOT EXISTS gocardless_account_balances JSON,
+ADD COLUMN IF NOT EXISTS gocardless_last_refresh TIMESTAMP NULL,
+ADD COLUMN IF NOT EXISTS gocardless_accounts_list JSON;
+`;
+
+// 2. FONCTION DE CACHE INTELLIGENTE CÔTÉ BACKEND
+const getCachedAccountData = async (userId, accountId, forceRefresh = false) => {
+    // Vérifier le cache d'abord
+    const cacheQuery = `
+        SELECT 
+            gocardless_account_details,
+            gocardless_account_balances,
+            gocardless_last_refresh,
+            gocardless_accounts_list
+        FROM utilisateurs 
+        WHERE id = ?
+    `;
+    
+    const cacheResult = await db.query(cacheQuery, [userId]);
+    const cachedData = cacheResult[0];
+    
+    // Si les données sont récentes (moins de 24h) et pas de force refresh
+    const lastRefresh = new Date(cachedData.gocardless_last_refresh);
+    const now = new Date();
+    const hoursSinceRefresh = (now - lastRefresh) / (1000 * 60 * 60);
+    
+    if (!forceRefresh && hoursSinceRefresh < 24 && cachedData.gocardless_account_details) {
+        console.log('📦 Utilisation des données en cache');
+        return {
+            details: JSON.parse(cachedData.gocardless_account_details),
+            balances: JSON.parse(cachedData.gocardless_account_balances),
+            accounts: JSON.parse(cachedData.gocardless_accounts_list || '[]'),
+            fromCache: true
+        };
+    }
+    
+    try {
+        // Sinon, faire l'appel API et mettre en cache
+        console.log('🌐 Appel API GoCardless - limite utilisée');
+        
+        const accessToken = await getGoCardlessToken();
+        
+        // Récupérer les comptes d'abord
+        const accountsResponse = await fetch(`${GOCARDLESS_BASE_URL}/requisitions/${cachedData.gocardless_requisition_id}/`, {
+            method: 'GET',
+            headers: {
+                'accept': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            }
+        });
+        
+        const accountsData = await accountsResponse.json();
+        
+        if (!accountsResponse.ok) {
+            throw new Error(`Erreur comptes: ${accountsData.detail}`);
+        }
+        
+        // Récupérer les détails du compte spécifique
+        const detailsResponse = await fetch(`${GOCARDLESS_BASE_URL}/accounts/${accountId}/details/`, {
+            method: 'GET',
+            headers: {
+                'accept': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            }
+        });
+        
+        const details = await detailsResponse.json();
+        
+        // Récupérer les soldes
+        const balancesResponse = await fetch(`${GOCARDLESS_BASE_URL}/accounts/${accountId}/balances/`, {
+            method: 'GET',
+            headers: {
+                'accept': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            }
+        });
+        
+        const balances = await balancesResponse.json();
+        
+        // Mettre en cache
+        const updateCacheQuery = `
+            UPDATE utilisateurs 
+            SET 
+                gocardless_account_details = ?,
+                gocardless_account_balances = ?,
+                gocardless_accounts_list = ?,
+                gocardless_last_refresh = CURRENT_TIMESTAMP
+            WHERE id = ?
+        `;
+        
+        await db.query(updateCacheQuery, [
+            JSON.stringify(details),
+            JSON.stringify(balances),
+            JSON.stringify(accountsData.accounts || []),
+            userId
+        ]);
+        
+        console.log('💾 Données mises en cache avec succès');
+        
+        return {
+            details,
+            balances,
+            accounts: accountsData.accounts || [],
+            fromCache: false
+        };
+        
+    } catch (error) {
+        console.error('❌ Erreur API GoCardless:', error);
+        
+        // En cas d'erreur (rate limit), retourner les données en cache si disponibles
+        if (cachedData.gocardless_account_details) {
+            console.log('📦 Fallback vers cache après erreur API');
+            return {
+                details: JSON.parse(cachedData.gocardless_account_details),
+                balances: JSON.parse(cachedData.gocardless_account_balances),
+                accounts: JSON.parse(cachedData.gocardless_accounts_list || '[]'),
+                fromCache: true,
+                error: error.message
+            };
+        }
+        
+        throw error;
+    }
+};
+
+// GET - Récupérer les institutions bancaires par pays
+app.get('/gocardless/institutions/:country', authenticateToken, async (req, res) => {
+    const { country } = req.params; // ex: 'FR' pour France
+    
+    try {
+        const accessToken = await getGoCardlessToken();
+        
+        const response = await fetch(`${GOCARDLESS_BASE_URL}/institutions/?country=${country}`, {
+            method: 'GET',
+            headers: {
+                'accept': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            }
+        });
+
+        const data = await response.json();
+        
+        if (!response.ok) {
+            return res.status(500).json({ 
+                success: false, 
+                message: 'Erreur récupération institutions', 
+                error: data 
+            });
+        }
+
+        res.json({
+            success: true,
+            data: data
+        });
+        
+    } catch (error) {
+        console.error('Erreur institutions GoCardless:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Erreur serveur', 
+            error: error.message 
+        });
+    }
+});
+
+// POST - Créer un accord utilisateur final (optionnel)
+app.post('/gocardless/agreements', authenticateToken, async (req, res) => {
+    const { institution_id, max_historical_days, access_valid_for_days, access_scope } = req.body;
+    
+    try {
+        const accessToken = await getGoCardlessToken();
+        
+        const agreementData = {
+            institution_id: institution_id,
+            max_historical_days: max_historical_days || 180,
+            access_valid_for_days: access_valid_for_days || 30,
+            access_scope: access_scope || ["balances", "details", "transactions"]
+        };
+
+        const response = await fetch(`${GOCARDLESS_BASE_URL}/agreements/enduser/`, {
+            method: 'POST',
+            headers: {
+                'accept': 'application/json',
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(agreementData)
+        });
+
+        const data = await response.json();
+        
+        if (!response.ok) {
+            return res.status(500).json({ 
+                success: false, 
+                message: 'Erreur création accord', 
+                error: data 
+            });
+        }
+
+        // Sauvegarder l'accord en base si nécessaire
+        const userId = req.user.userId;
+        const updateQuery = `
+            UPDATE utilisateurs 
+            SET gocardless_agreement_id = ?, gocardless_institution_id = ?
+            WHERE id = ?
+        `;
+        
+        db.query(updateQuery, [data.id, institution_id, userId], (err) => {
+            if (err) {
+                console.error('Erreur sauvegarde accord:', err);
+            }
+        });
+
+        res.json({
+            success: true,
+            data: data
+        });
+        
+    } catch (error) {
+        console.error('Erreur création accord GoCardless:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Erreur serveur', 
+            error: error.message 
+        });
+    }
+});
+
+// POST - Créer une réquisition (lien de connexion)
+app.post('/gocardless/requisitions', authenticateToken, async (req, res) => {
+    const { institution_id, agreement_id, reference, user_language } = req.body;
+    const userId = req.user.userId;
+    
+    try {
+        const accessToken = await getGoCardlessToken();
+        
+        const requisitionData = {
+            redirect: `${req.protocol}://${req.get('host')}/gestion-locative/api/gocardless/callback`, // URL de retour
+            institution_id: institution_id,
+            reference: reference || `user_${userId}_${Date.now()}`,
+            agreement: agreement_id, // Optionnel
+            user_language: user_language || 'fr' // français par défaut
+        };
+
+        const response = await fetch(`${GOCARDLESS_BASE_URL}/requisitions/`, {
+            method: 'POST',
+            headers: {
+                'accept': 'application/json',
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(requisitionData)
+        });
+
+        const data = await response.json();
+        
+        if (!response.ok) {
+            return res.status(500).json({ 
+                success: false, 
+                message: 'Erreur création réquisition', 
+                error: data 
+            });
+        }
+
+        // Sauvegarder la réquisition en base
+        const updateQuery = `
+            UPDATE utilisateurs 
+            SET gocardless_requisition_id = ?, gocardless_link = ?
+            WHERE id = ?
+        `;
+        
+        db.query(updateQuery, [data.id, data.link, userId], (err) => {
+            if (err) {
+                console.error('Erreur sauvegarde réquisition:', err);
+            }
+        });
+
+        res.json({
+            success: true,
+            data: {
+                requisition_id: data.id,
+                link: data.link, // URL vers laquelle rediriger l'utilisateur
+                redirect: data.redirect,
+                status: data.status
+            }
+        });
+        
+    } catch (error) {
+        console.error('Erreur création réquisition GoCardless:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Erreur serveur', 
+            error: error.message 
+        });
+    }
+});
+
+// GET - Page de callback après authentification bancaire
+app.get('/gocardless/callback', async (req, res) => {
+    const { ref } = req.query; // référence de la réquisition
+    
+    try {
+        // Rediriger vers le frontend avec le statut
+        res.redirect(`/settings?tab=banking&status=success&ref=${ref}`);
+        
+    } catch (error) {
+        console.error('Erreur callback GoCardless:', error);
+        res.redirect(`/settings?tab=banking&status=error`);
+    }
+});
+
+// GET - Récupérer les comptes liés
+app.get('/gocardless/accounts', authenticateToken, async (req, res) => {
+    const userId = req.user.userId;
+    const forceRefresh = req.query.refresh === 'true';
+    
+    try {
+        // Récupérer la réquisition ID de l'utilisateur
+        db.query('SELECT gocardless_requisition_id FROM utilisateurs WHERE id = ?', [userId], async (err, results) => {
+            if (err || results.length === 0 || !results[0].gocardless_requisition_id) {
+                return res.status(404).json({ 
+                    success: false, 
+                    message: 'Aucune connexion bancaire trouvée' 
+                });
+            }
+
+            try {
+                const data = await getCachedAccountData(userId, null, forceRefresh);
+                
+                res.json({
+                    success: true,
+                    data: {
+                        accounts: data.accounts,
+                        fromCache: data.fromCache,
+                        lastRefresh: data.fromCache ? 'Cache utilisé' : 'Données fraîches',
+                        error: data.error || null
+                    }
+                });
+                
+            } catch (error) {
+                res.status(500).json({
+                    success: false,
+                    message: error.message.includes('Rate limit') 
+                        ? 'Limite de requêtes atteinte. Les données seront actualisées demain.'
+                        : 'Erreur lors de la récupération des comptes',
+                    rateLimitExceeded: error.message.includes('Rate limit')
+                });
+            }
+        });
+        
+    } catch (error) {
+        console.error('Erreur récupération comptes GoCardless:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Erreur serveur' 
+        });
+    }
+});
+
+// GET - Récupérer les détails d'un compte
+app.get('/gocardless/accounts/:accountId/details', authenticateToken, async (req, res) => {
+    const { accountId } = req.params;
+    const userId = req.user.userId;
+    const forceRefresh = req.query.refresh === 'true';
+    
+    try {
+        const data = await getCachedAccountData(userId, accountId, forceRefresh);
+        
+        res.json({
+            success: true,
+            data: {
+                ...data.details,
+                balances: data.balances?.balances || [],
+                fromCache: data.fromCache,
+                lastRefresh: data.fromCache ? 'Données en cache' : 'Données fraîches',
+                error: data.error || null
+            }
+        });
+        
+    } catch (error) {
+        console.error('Erreur détails compte GoCardless:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: error.message.includes('Rate limit') 
+                ? 'Limite de requêtes atteinte. Données mises en cache utilisées.'
+                : 'Erreur serveur',
+            rateLimitExceeded: error.message.includes('Rate limit')
+        });
+    }
+});
+
+// GET - Récupérer les soldes d'un compte
+app.get('/gocardless/accounts/:accountId/balances', authenticateToken, async (req, res) => {
+    const { accountId } = req.params;
+    const userId = req.user.userId;
+    const forceRefresh = req.query.refresh === 'true';
+    
+    try {
+        const data = await getCachedAccountData(userId, accountId, forceRefresh);
+        
+        res.json({
+            success: true,
+            data: {
+                balances: data.balances?.balances || [],
+                fromCache: data.fromCache,
+                lastRefresh: data.fromCache ? 'Données en cache' : 'Données fraîches'
+            }
+        });
+        
+    } catch (error) {
+        console.error('Erreur soldes compte GoCardless:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: error.message.includes('Rate limit') 
+                ? 'Limite de requêtes atteinte pour aujourd\'hui.'
+                : 'Erreur serveur',
+            rateLimitExceeded: error.message.includes('Rate limit')
+        });
+    }
+});
+
+// GET - Récupérer les transactions d'un compte
+app.get('/gocardless/accounts/:accountId/transactions', authenticateToken, async (req, res) => {
+    const { accountId } = req.params;
+    const { date_from, date_to } = req.query;
+    
+    try {
+        const accessToken = await getGoCardlessToken();
+        
+        let url = `${GOCARDLESS_BASE_URL}/accounts/${accountId}/transactions/`;
+        const params = new URLSearchParams();
+        if (date_from) params.append('date_from', date_from);
+        if (date_to) params.append('date_to', date_to);
+        if (params.toString()) url += `?${params.toString()}`;
+        
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: {
+                'accept': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            }
+        });
+
+        const data = await response.json();
+        
+        if (!response.ok) {
+            return res.status(500).json({ 
+                success: false, 
+                message: 'Erreur récupération transactions', 
+                error: data 
+            });
+        }
+
+        res.json({
+            success: true,
+            data: data
+        });
+        
+    } catch (error) {
+        console.error('Erreur transactions GoCardless:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Erreur serveur', 
+            error: error.message 
+        });
+    }
+});
+
+// DELETE - Supprimer une réquisition (déconnexion)
+app.delete('/gocardless/requisitions/:requisitionId', authenticateToken, async (req, res) => {
+    const { requisitionId } = req.params;
+    const userId = req.user.userId;
+    
+    try {
+        const accessToken = await getGoCardlessToken();
+        
+        const response = await fetch(`${GOCARDLESS_BASE_URL}/requisitions/${requisitionId}/`, {
+            method: 'DELETE',
+            headers: {
+                'Authorization': `Bearer ${accessToken}`
+            }
+        });
+        
+        if (response.ok || response.status === 404) {
+            // Nettoyer les données GoCardless de l'utilisateur
+            const updateQuery = `
+                UPDATE utilisateurs 
+                SET gocardless_requisition_id = NULL, 
+                    gocardless_link = NULL, 
+                    gocardless_agreement_id = NULL,
+                    gocardless_institution_id = NULL
+                WHERE id = ?
+            `;
+            
+            db.query(updateQuery, [userId], (err) => {
+                if (err) {
+                    console.error('Erreur nettoyage données GoCardless:', err);
+                    return res.status(500).json({ 
+                        success: false, 
+                        message: 'Erreur lors du nettoyage' 
+                    });
+                }
+                
+                res.json({
+                    success: true,
+                    message: 'Connexion bancaire supprimée avec succès'
+                });
+            });
+        } else {
+            const data = await response.json();
+            res.status(500).json({ 
+                success: false, 
+                message: 'Erreur suppression réquisition', 
+                error: data 
+            });
+        }
+        
+    } catch (error) {
+        console.error('Erreur suppression réquisition GoCardless:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Erreur serveur', 
+            error: error.message 
+        });
+    }
+});
+
+app.post('/gocardless/force-sync', authenticateToken, async (req, res) => {
+    const userId = req.user.userId;
+    
+    try {
+        // Vérifier quand a eu lieu la dernière synchronisation
+        const lastSyncQuery = 'SELECT gocardless_last_refresh FROM utilisateurs WHERE id = ?';
+        const lastSync = await db.query(lastSyncQuery, [userId]);
+        
+        if (lastSync[0]?.gocardless_last_refresh) {
+            const lastRefresh = new Date(lastSync[0].gocardless_last_refresh);
+            const now = new Date();
+            const hoursSinceRefresh = (now - lastRefresh) / (1000 * 60 * 60);
+            
+            if (hoursSinceRefresh < 6) { // Limiter à 4 fois par jour max
+                return res.json({
+                    success: false,
+                    message: `Synchronisation déjà effectuée il y a ${Math.round(hoursSinceRefresh)}h. Réessayez plus tard.`,
+                    rateLimitPreventive: true
+                });
+            }
+        }
+        
+        // Tenter la synchronisation forcée
+        const data = await getCachedAccountData(userId, null, true);
+        
+        res.json({
+            success: true,
+            message: 'Synchronisation effectuée avec succès',
+            data: {
+                accountsCount: data.accounts.length,
+                fromCache: false
+            }
+        });
+        
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message.includes('Rate limit') 
+                ? 'Limite de synchronisation atteinte. Réessayez demain.'
+                : 'Erreur lors de la synchronisation',
+            rateLimitExceeded: error.message.includes('Rate limit')
+        });
+    }
+});
+
+// ========================= AJOUT DE COLONNES GOCARDLESS EN BASE =========================
+
+// Ajouter ces colonnes à la table utilisateurs
+setTimeout(() => {
+    const goCardlessColumns = [
+        `ADD COLUMN IF NOT EXISTS gocardless_requisition_id VARCHAR(255)`,
+        `ADD COLUMN IF NOT EXISTS gocardless_link VARCHAR(500)`,
+        `ADD COLUMN IF NOT EXISTS gocardless_agreement_id VARCHAR(255)`,
+        `ADD COLUMN IF NOT EXISTS gocardless_institution_id VARCHAR(255)`,
+        `ADD COLUMN IF NOT EXISTS gocardless_last_sync TIMESTAMP NULL`
+    ];
+
+    goCardlessColumns.forEach(columnQuery => {
+        db.query(`ALTER TABLE utilisateurs ${columnQuery}`, (err) => {
+            if (err && !/Duplicate column/.test(err.message)) {
+                console.error('Erreur ajout colonne GoCardless:', err.message);
+            }
+        });
+    });
+    console.log('✅ Colonnes GoCardless ajoutées à la table utilisateurs');
+}, 4000);
+
+setTimeout(() => {
+    db.query(addCacheColumns, (err) => {
+        if (err && !/Duplicate column/.test(err.message)) {
+            console.error('Erreur ajout colonnes cache GoCardless:', err.message);
+        } else {
+            console.log('✅ Colonnes de cache GoCardless ajoutées');
+        }
+    });
+}, 5000);
+
+const dailyBankSync = async () => {
+    console.log('🔄 Synchronisation bancaire automatique...');
+    
+    // Récupérer tous les utilisateurs avec une connexion GoCardless
+    const usersQuery = `
+        SELECT id, gocardless_requisition_id, gocardless_last_refresh 
+        FROM utilisateurs 
+        WHERE gocardless_requisition_id IS NOT NULL
+    `;
+    
+    db.query(usersQuery, async (err, users) => {
+        if (err || !users.length) return;
+        
+        for (const user of users) {
+            const lastRefresh = user.gocardless_last_refresh ? new Date(user.gocardless_last_refresh) : null;
+            const now = new Date();
+            const hoursSinceRefresh = lastRefresh ? (now - lastRefresh) / (1000 * 60 * 60) : 999;
+            
+            // Synchroniser seulement si ça fait plus de 20h
+            if (hoursSinceRefresh > 20) {
+                try {
+                    console.log(`🔄 Sync utilisateur ${user.id}`);
+                    await getCachedAccountData(user.id, null, true);
+                    
+                    // Attendre 2 secondes entre chaque utilisateur pour éviter le spam
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    
+                } catch (error) {
+                    console.log(`❌ Échec sync utilisateur ${user.id}:`, error.message);
+                }
+            }
+        }
+    });
+};
+
+const schedule = require('node-cron');
+schedule.schedule('0 3 * * *', dailyBankSync);
+
+// ========================= ROUTES APPARTEMENTS =========================
+
+// GET - Récupérer tous les appartements de l'utilisateur
+app.get('/apartments', authenticateToken, (req, res) => {
+    const userId = req.user.userId;
+    
+    const query = `
+        SELECT 
+            a.*,
+            l.nom as locataire_nom,
+            l.prenom as locataire_prenom,
+            loc.date_debut as location_debut,
+            loc.date_fin as location_fin
+        FROM appartements a
+        LEFT JOIN locations loc ON a.id = loc.appartement_id AND loc.statut = 'active'
+        LEFT JOIN locataires l ON loc.locataire_id = l.id
+        WHERE a.utilisateur_id = ?
+        ORDER BY a.date_creation DESC
+    `;
+
+    db.query(query, [userId], (err, results) => {
+        if (err) {
+            console.error('Erreur lors de la récupération des appartements:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+
+        const apartments = results.map(apartment => ({
+            ...apartment,
+            locataire_actuel: apartment.locataire_nom && apartment.locataire_prenom 
+                ? `${apartment.locataire_prenom} ${apartment.locataire_nom}` 
+                : null
+        }));
+
+        res.json(apartments);
+    });
+});
+
+// GET - Récupérer un appartement par ID
+app.get('/apartments/:id', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+    
+    const query = `
+        SELECT 
+            a.*,
+            l.nom as locataire_nom,
+            l.prenom as locataire_prenom,
+            l.email as locataire_email,
+            l.telephone as locataire_telephone,
+            loc.date_debut as location_debut,
+            loc.date_fin as location_fin,
+            loc.loyer_mensuel,
+            loc.charges_mensuelles
+        FROM appartements a
+        LEFT JOIN locations loc ON a.id = loc.appartement_id AND loc.statut = 'active'
+        LEFT JOIN locataires l ON loc.locataire_id = l.id
+        WHERE a.id = ? AND a.utilisateur_id = ?
+    `;
+
+    db.query(query, [id, userId], (err, results) => {
+        if (err) {
+            console.error('Erreur lors de la récupération de l\'appartement:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+
+        if (results.length === 0) {
+            return res.status(404).json({ success: false, message: 'Appartement non trouvé' });
+        }
+
+        const apartment = results[0];
+        apartment.locataire_actuel = apartment.locataire_nom && apartment.locataire_prenom 
+            ? `${apartment.locataire_prenom} ${apartment.locataire_nom}` 
+            : null;
+
+        res.json(apartment);
+    });
+});
+
+// POST - Créer un nouvel appartement
+app.post('/apartments', authenticateToken, (req, res) => {
+    const userId = req.user.userId;
+    const {
+        titre, adresse_complete, surface, nb_pieces, nb_chambres,
+        prix_loyer, charges, depot_garantie, statut, description
+    } = req.body;
+
+    // Extraction du code postal et de la ville depuis l'adresse
+    const adresseMatch = adresse_complete.match(/(\d{5})\s+(.+)$/);
+    const code_postal = adresseMatch ? adresseMatch[1] : '';
+    const ville = adresseMatch ? adresseMatch[2] : '';
+
+    const query = `
+        INSERT INTO appartements (
+            utilisateur_id, titre, adresse_complete, code_postal, ville, surface, 
+            nb_pieces, nb_chambres, prix_loyer, charges, depot_garantie, 
+            statut, description
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+
+    db.query(query, [
+        userId, titre, adresse_complete, code_postal, ville, surface,
+        nb_pieces, nb_chambres, prix_loyer, charges, depot_garantie,
+        statut, description
+    ], (err, result) => {
+        if (err) {
+            console.error('Erreur lors de la création de l\'appartement:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+
+        res.json({ 
+            success: true, 
+            message: 'Appartement créé avec succès',
+            id: result.insertId 
+        });
+    });
+});
+
+// PUT - Modifier un appartement
+app.put('/apartments/:id', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+    const {
+        titre, adresse_complete, surface, nb_pieces, nb_chambres,
+        prix_loyer, charges, depot_garantie, statut, description
+    } = req.body;
+
+    const adresseMatch = adresse_complete.match(/(\d{5})\s+(.+)$/);
+    const code_postal = adresseMatch ? adresseMatch[1] : '';
+    const ville = adresseMatch ? adresseMatch[2] : '';
+
+    const query = `
+        UPDATE appartements SET
+            titre = ?, adresse_complete = ?, code_postal = ?, ville = ?,
+            surface = ?, nb_pieces = ?, nb_chambres = ?, prix_loyer = ?,
+            charges = ?, depot_garantie = ?, statut = ?, description = ?
+        WHERE id = ? AND utilisateur_id = ?
+    `;
+
+    db.query(query, [
+        titre, adresse_complete, code_postal, ville, surface,
+        nb_pieces, nb_chambres, prix_loyer, charges, depot_garantie,
+        statut, description, id, userId
+    ], (err, result) => {
+        if (err) {
+            console.error('Erreur lors de la modification de l\'appartement:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ success: false, message: 'Appartement non trouvé' });
+        }
+
+        res.json({ success: true, message: 'Appartement modifié avec succès' });
+    });
+});
+
+// DELETE - Supprimer un appartement
+app.delete('/apartments/:id', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    db.query('DELETE FROM appartements WHERE id = ? AND utilisateur_id = ?', [id, userId], (err, result) => {
+        if (err) {
+            console.error('Erreur lors de la suppression de l\'appartement:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ success: false, message: 'Appartement non trouvé' });
+        }
+
+        res.json({ success: true, message: 'Appartement supprimé avec succès' });
+    });
+});
+
+// GET - Vérifier la disponibilité d'un appartement
+app.get('/apartments/:id/availability', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const { date_debut, date_fin } = req.query;
+    const userId = req.user.userId;
+
+    // Vérifier ownership
+    db.query('SELECT id FROM appartements WHERE id = ? AND utilisateur_id = ?', [id, userId], (err, checkResults) => {
+        if (err || checkResults.length === 0) {
+            return res.status(404).json({ success: false, message: 'Appartement non trouvé' });
+        }
+
+        let availabilityQuery = `
+            SELECT COUNT(*) as conflicting_locations
+            FROM locations 
+            WHERE appartement_id = ? 
+            AND statut = 'active'
+        `;
+
+        let queryParams = [id];
+
+        // Si des dates sont fournies, vérifier les conflits de dates
+        if (date_debut) {
+            availabilityQuery += ` AND (
+                (date_debut <= ? AND (date_fin IS NULL OR date_fin >= ?))
+            )`;
+            queryParams.push(date_debut, date_debut);
+
+            if (date_fin) {
+                availabilityQuery += ` OR (
+                    date_debut <= ? AND (date_fin IS NULL OR date_fin >= ?)
+                )`;
+                queryParams.push(date_fin, date_fin);
+            }
+        }
+
+        db.query(availabilityQuery, queryParams, (err2, results) => {
+            if (err2) {
+                console.error('Erreur vérification disponibilité:', err2);
+                return res.status(500).json({ success: false, message: 'Erreur serveur' });
+            }
+
+            const isAvailable = results[0].conflicting_locations === 0;
+            res.json({ 
+                success: true, 
+                data: { 
+                    available: isAvailable,
+                    conflicting_locations: results[0].conflicting_locations
+                }
+            });
+        });
+    });
+});
+
+// GET - Récupérer les locataires d'un appartement (CORRIGÉ)
+app.get('/apartments/:id/tenants', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    console.log('🔍 Récupération locataires pour appartement:', id, 'utilisateur:', userId);
+
+    // Vérifier que l'appartement appartient à l'utilisateur
+    const checkQuery = 'SELECT id FROM appartements WHERE id = ? AND utilisateur_id = ?';
+    db.query(checkQuery, [id, userId], (err, checkResults) => {
+        if (err || checkResults.length === 0) {
+            console.log('❌ Appartement non trouvé ou non autorisé');
+            return res.status(404).json([]);
+        }
+
+        const query = `
+            SELECT 
+                l.*,
+                loc.id as location_id,
+                loc.date_debut,
+                loc.date_fin,
+                loc.statut as location_statut,
+                loc.loyer_mensuel,
+                loc.charges_mensuelles,
+                loc.depot_garantie
+            FROM locataires l
+            JOIN locations loc ON l.id = loc.locataire_id
+            WHERE loc.appartement_id = ?
+            ORDER BY loc.date_debut DESC
+        `;
+
+        console.log('🔍 Query locataires:', query);
+        console.log('🔍 Params:', [id]);
+
+        db.query(query, [id], (err, results) => {
+            if (err) {
+                console.error('❌ Erreur lors de la récupération des locataires:', err);
+                return res.json([]); // Retourner array vide au lieu d'erreur
+            }
+
+            console.log('✅ Locataires trouvés:', results.length);
+            console.log('📊 Données locataires:', results);
+
+            // Retourner directement l'array
+            res.json(results);
+        });
+    });
+});
+
+// GET - Récupérer les documents d'un appartement (CORRIGÉ)
+app.get('/apartments/:id/documents', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    console.log('🔍 Récupération documents pour appartement:', id);
+
+    // Vérifier ownership
+    db.query('SELECT id FROM appartements WHERE id = ? AND utilisateur_id = ?', [id, userId], (err, checkResults) => {
+        if (err || checkResults.length === 0) {
+            console.log('❌ Appartement non trouvé pour documents');
+            return res.json([]);
+        }
+
+        const query = `
+            SELECT 
+                id,
+                nom_document,
+                type_document,
+                chemin_fichier,
+                url,
+                description,
+                date_upload
+            FROM documents 
+            WHERE appartement_id = ? 
+            ORDER BY date_upload DESC
+        `;
+
+        console.log('🔍 Query documents:', query);
+
+        db.query(query, [id], (err, results) => {
+            if (err) {
+                console.error('❌ Erreur lors de la récupération des documents:', err);
+                return res.json([]);
+            }
+
+            console.log('✅ Documents trouvés:', results.length);
+
+            const documents = results.map(doc => ({
+                ...doc,
+                url: doc.url || `uploads/${doc.chemin_fichier.split('/').pop()}`
+            }));
+
+            console.log('📊 Documents formatés:', documents);
+            res.json(documents);
+        });
+    });
+});
+
+
+// GET - Récupérer les factures d'un appartement
+app.get('/apartments/:id/invoices', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    console.log('🔍 Récupération factures pour appartement:', id);
+
+    // Vérifier ownership
+    db.query('SELECT id FROM appartements WHERE id = ? AND utilisateur_id = ?', [id, userId], (err, checkResults) => {
+        if (err || checkResults.length === 0) {
+            console.log('❌ Appartement non trouvé pour factures');
+            return res.json([]);
+        }
+
+        const query = `
+            SELECT 
+                id,
+                type_facture,
+                numero_facture,
+                montant,
+                date_facture,
+                date_echeance,
+                statut,
+                description,
+                date_creation
+            FROM factures 
+            WHERE appartement_id = ? 
+            ORDER BY date_facture DESC
+        `;
+
+        console.log('🔍 Query factures:', query);
+
+        db.query(query, [id], (err, results) => {
+            if (err) {
+                console.error('❌ Erreur lors de la récupération des factures:', err);
+                return res.json([]);
+            }
+
+            console.log('✅ Factures trouvées:', results.length);
+            console.log('📊 Données factures:', results);
+
+            res.json(results);
+        });
+    });
+});
+
+// backend/index.js - PARTIE 3/6 : Routes Médias et Locataires
+
+// ========================= ROUTES MÉDIAS =========================
+
+// POST - Upload de médias pour un appartement
+app.post('/apartments/:id/media', authenticateToken, upload.array('media', 10), (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+    const files = req.files;
+
+    if (!files || files.length === 0) {
+        return res.status(400).json({ success: false, message: 'Aucun fichier uploadé' });
+    }
+
+    // Vérifier que l'appartement appartient à l'utilisateur
+    db.query('SELECT id FROM appartements WHERE id = ? AND utilisateur_id = ?', [id, userId], (err, results) => {
+        if (err || results.length === 0) {
+            return res.status(404).json({ success: false, message: 'Appartement non trouvé' });
+        }
+
+        const mediaPromises = files.map(file => {
+            return new Promise((resolve, reject) => {
+                const type_media = file.mimetype.startsWith('image/') ? 'photo' : 'video';
+                const query = `
+                    INSERT INTO medias (appartement_id, nom_fichier, chemin_fichier, type_media, url)
+                    VALUES (?, ?, ?, ?, ?)
+                `;
+
+                db.query(query, [id, file.originalname, file.path, type_media, `uploads/${file.filename}`], (err, result) => {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve({ id: result.insertId, chemin_fichier: file.path, type_media });
+                    }
+                });
+            });
+        });
+
+        Promise.all(mediaPromises)
+            .then(insertedMedias => {
+                // Vérifier s'il y a déjà une photo_principale
+                db.query(
+                    'SELECT photo_principale FROM appartements WHERE id = ?',
+                    [id],
+                    (err, results) => {
+                        if (err) {
+                            console.error('Erreur lors de la vérification de la photo principale :', err);
+                            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+                        }
+
+                        const currentPhotoPrincipale = results[0]?.photo_principale;
+
+                        if (!currentPhotoPrincipale) {
+                            const firstPhoto = insertedMedias.find(m => m.type_media === 'photo');
+                            if (firstPhoto) {
+                                db.query(
+                                    'UPDATE appartements SET photo_principale = ? WHERE id = ?',
+                                    [firstPhoto.chemin_fichier, id],
+                                    (err) => {
+                                        if (err) {
+                                            console.error('Erreur mise à jour photo principale :', err);
+                                            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+                                        }
+                                        return res.json({ success: true, message: 'Médias uploadés et photo principale mise à jour' });
+                                    }
+                                );
+                            } else {
+                                return res.json({ success: true, message: 'Médias uploadés (aucune image trouvée pour photo principale)' });
+                            }
+                        } else {
+                            return res.json({ success: true, message: 'Médias uploadés (photo principale déjà définie)' });
+                        }
+                    }
+                );
+            })
+            .catch(err => {
+                console.error('Erreur lors de l\'upload des médias:', err);
+                res.status(500).json({ success: false, message: 'Erreur lors de l\'upload' });
+            });
+    });
+});
+
+// GET - Récupérer les médias d'un appartement (CORRIGÉ)
+app.get('/apartments/:id/media', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    console.log('🔍 Récupération médias pour appartement:', id);
+
+    // Vérifier que l'appartement appartient à l'utilisateur
+    const checkQuery = 'SELECT id FROM appartements WHERE id = ? AND utilisateur_id = ?';
+    db.query(checkQuery, [id, userId], (err, checkResults) => {
+        if (err || checkResults.length === 0) {
+            console.log('❌ Appartement non trouvé pour médias');
+            return res.json([]);
+        }
+
+        const query = `
+            SELECT 
+                id,
+                nom_fichier,
+                chemin_fichier,
+                url,
+                type_media,
+                ordre_affichage,
+                date_upload
+            FROM medias 
+            WHERE appartement_id = ? 
+            ORDER BY ordre_affichage ASC, date_upload ASC
+        `;
+
+        console.log('🔍 Query médias:', query);
+
+        db.query(query, [id], (err, results) => {
+            if (err) {
+                console.error('❌ Erreur lors de la récupération des médias:', err);
+                return res.json([]);
+            }
+
+            console.log('✅ Médias trouvés:', results.length);
+
+            const medias = results.map(media => ({
+                ...media,
+                url: media.url || `uploads/${media.chemin_fichier.split('/').pop()}`
+            }));
+
+            console.log('📊 Médias formatés:', medias);
+            res.json(medias);
+        });
+    });
+});
+
+// DELETE - Supprimer un média
+app.delete('/media/:id', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    // Récupérer les infos du média et vérifier l'ownership
+    const query = `
+        SELECT m.chemin_fichier, m.appartement_id 
+        FROM medias m
+        JOIN appartements a ON m.appartement_id = a.id
+        WHERE m.id = ? AND a.utilisateur_id = ?
+    `;
+
+    db.query(query, [id, userId], (err, results) => {
+        if (err) {
+            console.error('Erreur récupération média:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+
+        if (results.length === 0) {
+            return res.status(404).json({ success: false, message: 'Média introuvable' });
+        }
+
+        const { chemin_fichier, appartement_id } = results[0];
+
+        // Supprimer le fichier physique
+        fs.unlink(chemin_fichier, (err) => {
+            if (err) console.error('Erreur suppression fichier:', err);
+        });
+
+        // Supprimer le média de la BDD
+        db.query('DELETE FROM medias WHERE id = ?', [id], (err) => {
+            if (err) {
+                console.error('Erreur suppression média BDD:', err);
+                return res.status(500).json({ success: false, message: 'Erreur serveur' });
+            }
+
+            // Vérifier s'il reste d'autres images pour le même appartement
+            db.query('SELECT COUNT(*) AS count FROM medias WHERE appartement_id = ?', [appartement_id], (err, results) => {
+                if (err) {
+                    console.error('Erreur vérification restantes images:', err);
+                    return res.status(500).json({ success: false, message: 'Erreur serveur' });
+                }
+
+                const remainingImages = results[0].count;
+
+                if (remainingImages === 0) {
+                    // Mettre à NULL la photo principale si plus d'image pour cet appartement
+                    db.query('UPDATE appartements SET photo_principale = NULL WHERE id = ?', [appartement_id], (err) => {
+                        if (err) {
+                            console.error('Erreur mise à jour appartement:', err);
+                            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+                        }
+
+                        return res.json({ success: true, message: 'Média supprimé, photo principale réinitialisée' });
+                    });
+                } else {
+                    return res.json({ success: true, message: 'Média supprimé avec succès' });
+                }
+            });
+        });
+    });
+});
+
+// ========================= ROUTES LOCATAIRES =========================
+
+// GET - Récupérer tous les locataires de l'utilisateur
+app.get('/tenants', authenticateToken, (req, res) => {
+    const userId = req.user.userId;
+    
+    const query = `
+        SELECT 
+            id,
+            nom,
+            prenom,
+            email,
+            telephone,
+            date_naissance,
+            profession,
+            salaire,
+            date_creation
+        FROM locataires 
+        WHERE utilisateur_id = ?
+        ORDER BY nom, prenom
+    `;
+
+    db.query(query, [userId], (err, results) => {
+        if (err) {
+            console.error('Erreur lors de la récupération des locataires:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+
+        res.json(results);
+    });
+});
+
+// GET - Récupérer un locataire par ID
+app.get('/tenants/:id', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    const query = `SELECT * FROM locataires WHERE id = ? AND utilisateur_id = ?`;
+
+    db.query(query, [id, userId], (err, results) => {
+        if (err) {
+            console.error('Erreur lors de la récupération du locataire:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+
+        if (results.length === 0) {
+            return res.status(404).json({ success: false, message: 'Locataire non trouvé' });
+        }
+        
+        res.json({ success: true, data: results[0] });
+    });
+});
+
+// POST - Créer un nouveau locataire
+app.post('/tenants', authenticateToken, (req, res) => {
+    const userId = req.user.userId;
+    const {
+        nom, prenom, email, telephone, date_naissance, 
+        profession, salaire
+    } = req.body;
+
+    console.log('=== DONNÉES REÇUES POUR LOCATAIRE ===');
+    console.log('Body complet:', req.body);
+
+    // Gérer la date de naissance vide
+    const dateNaissance = date_naissance && date_naissance.trim() !== '' ? date_naissance : null;
+    
+    console.log('Date naissance traitée:', dateNaissance);
+
+    const query = `
+        INSERT INTO locataires (utilisateur_id, nom, prenom, email, telephone, date_naissance, profession, salaire)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+
+    const values = [
+        userId,
+        nom, 
+        prenom, 
+        email || null, 
+        telephone || null, 
+        dateNaissance, 
+        profession || null, 
+        parseFloat(salaire) || null
+    ];
+
+    console.log('Query:', query);
+    console.log('Values:', values);
+
+    db.query(query, values, (err, result) => {
+        if (err) {
+            console.error('Erreur lors de la création du locataire:', err);
+            return res.status(500).json({ 
+                success: false, 
+                message: 'Erreur serveur: ' + err.message 
+            });
+        }
+
+        console.log('Locataire créé avec succès, ID:', result.insertId);
+
+        res.json({ 
+            success: true, 
+            message: 'Locataire créé avec succès',
+            id: result.insertId 
+        });
+    });
+});
+
+// PUT - Modifier un locataire
+app.put('/tenants/:id', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+    const {
+        nom, prenom, email, telephone, date_naissance, 
+        profession, salaire
+    } = req.body;
+
+    const query = `
+        UPDATE locataires SET
+            nom = ?, prenom = ?, email = ?, telephone = ?,
+            date_naissance = ?, profession = ?, salaire = ?
+        WHERE id = ? AND utilisateur_id = ?
+    `;
+
+    db.query(query, [
+        nom, prenom, email, telephone, date_naissance, 
+        profession, salaire, id, userId
+    ], (err, result) => {
+        if (err) {
+            console.error('Erreur lors de la modification du locataire:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ success: false, message: 'Locataire non trouvé' });
+        }
+
+        res.json({ success: true, message: 'Locataire modifié avec succès' });
+    });
+});
+
+// DELETE - Supprimer un locataire
+app.delete('/tenants/:id', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    db.query('DELETE FROM locataires WHERE id = ? AND utilisateur_id = ?', [id, userId], (err, result) => {
+        if (err) {
+            console.error('Erreur lors de la suppression du locataire:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ success: false, message: 'Locataire non trouvé' });
+        }
+
+        res.json({ success: true, message: 'Locataire supprimé avec succès' });
+    });
+});
+
+// GET - Récupérer toutes les locations d'un locataire
+app.get('/tenants/:id/locations', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    // Vérifier que le locataire appartient à l'utilisateur
+    const checkQuery = 'SELECT id FROM locataires WHERE id = ? AND utilisateur_id = ?';
+    db.query(checkQuery, [id, userId], (err, checkResults) => {
+        if (err || checkResults.length === 0) {
+            return res.status(404).json({ success: false, message: 'Locataire non trouvé' });
+        }
+
+        const query = `
+            SELECT 
+                loc.*,
+                a.titre as appartement_titre,
+                a.adresse_complete as appartement_adresse
+            FROM locations loc
+            JOIN appartements a ON loc.appartement_id = a.id
+            WHERE loc.locataire_id = ?
+            ORDER BY loc.date_debut DESC
+        `;
+
+        db.query(query, [id], (err, results) => {
+            if (err) {
+                console.error('Erreur récupération locations:', err);
+                return res.status(500).json({ success: false, message: 'Erreur serveur' });
+            }
+
+            res.json({ success: true, data: results });
+        });
+    });
+});
+
+// GET - Récupérer la location actuelle d'un locataire
+app.get('/tenants/:id/current-rental', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    const query = `
+        SELECT 
+            loc.*,
+            a.titre as appartement_titre,
+            a.adresse_complete as appartement_adresse
+        FROM locations loc
+        JOIN appartements a ON loc.appartement_id = a.id
+        JOIN locataires l ON loc.locataire_id = l.id
+        WHERE loc.locataire_id = ? AND loc.statut = 'active' AND l.utilisateur_id = ?
+        ORDER BY loc.date_debut DESC
+        LIMIT 1
+    `;
+
+    db.query(query, [id, userId], (err, results) => {
+        if (err) {
+            console.error('Erreur récupération location actuelle:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+
+        const currentRental = results.length > 0 ? results[0] : null;
+        res.json({ success: true, data: currentRental });
+    });
+});
+
+// GET - Récupérer l'historique des locations d'un locataire
+app.get('/tenants/:id/rental-history', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    const query = `
+        SELECT 
+            loc.*,
+            a.titre as appartement_titre,
+            a.adresse_complete as appartement_adresse
+        FROM locations loc
+        JOIN appartements a ON loc.appartement_id = a.id
+        JOIN locataires l ON loc.locataire_id = l.id
+        WHERE loc.locataire_id = ? AND loc.statut != 'active' AND l.utilisateur_id = ?
+        ORDER BY loc.date_debut DESC
+    `;
+
+    db.query(query, [id, userId], (err, results) => {
+        if (err) {
+            console.error('Erreur récupération historique:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+
+        res.json({ success: true, data: results });
+    });
+});
+
+// GET - Récupérer les documents d'un locataire
+app.get('/tenants/:id/documents', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    // Vérifier ownership
+    db.query('SELECT id FROM locataires WHERE id = ? AND utilisateur_id = ?', [id, userId], (err, checkResults) => {
+        if (err || checkResults.length === 0) {
+            return res.status(404).json({ success: false, message: 'Locataire non trouvé' });
+        }
+
+        const query = `
+            SELECT * FROM documents 
+            WHERE locataire_id = ? 
+            ORDER BY date_upload DESC
+        `;
+
+        db.query(query, [id], (err, results) => {
+            if (err) {
+                console.error('Erreur lors de la récupération des documents:', err);
+                return res.status(500).json({ success: false, message: 'Erreur serveur' });
+            }
+
+            const documents = results.map(doc => ({
+                ...doc,
+                url: doc.url || `/${doc.chemin_fichier}`
+            }));
+
+            res.json({ success: true, data: documents });
+        });
+    });
+});
+
+// GET - Récupérer les paiements d'un locataire
+app.get('/tenants/:id/payments', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    // Vérifier ownership
+    db.query('SELECT id FROM locataires WHERE id = ? AND utilisateur_id = ?', [id, userId], (err, checkResults) => {
+        if (err || checkResults.length === 0) {
+            return res.status(404).json({ success: false, message: 'Locataire non trouvé' });
+        }
+
+        const query = `
+            SELECT * FROM paiements 
+            WHERE locataire_id = ? 
+            ORDER BY date_paiement DESC
+        `;
+
+        db.query(query, [id], (err, results) => {
+            if (err) {
+                console.error('Erreur lors de la récupération des paiements:', err);
+                return res.status(500).json({ success: false, message: 'Erreur serveur' });
+            }
+
+            res.json({ success: true, data: results });
+        });
+    });
+});
+// backend/index.js - PARTIE 4/6 : Routes Locations (Nouvelles fonctionnalités)
+
+// ========================= ROUTES LOCATIONS =========================
+
+// GET - Récupérer une location par ID
+app.get('/locations/:id', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    const query = `
+        SELECT 
+            loc.*,
+            a.titre as appartement_titre,
+            a.adresse_complete as appartement_adresse,
+            l.nom as locataire_nom,
+            l.prenom as locataire_prenom
+        FROM locations loc
+        JOIN appartements a ON loc.appartement_id = a.id
+        JOIN locataires l ON loc.locataire_id = l.id
+        WHERE loc.id = ? AND a.utilisateur_id = ?
+    `;
+
+    db.query(query, [id, userId], (err, results) => {
+        if (err) {
+            console.error('Erreur récupération location:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+
+        if (results.length === 0) {
+            return res.status(404).json({ success: false, message: 'Location non trouvée' });
+        }
+
+        res.json({ success: true, data: results[0] });
+    });
+});
+
+// POST - Créer une nouvelle location
+app.post('/locations', authenticateToken, (req, res) => {
+    const userId = req.user.userId;
+    const {
+        appartement_id, locataire_id, date_debut, date_fin,
+        loyer_mensuel, charges_mensuelles, depot_garantie, statut
+    } = req.body;
+
+    console.log('=== CRÉATION LOCATION ===');
+    console.log('Body reçu:', req.body);
+
+    // Validation des données requises
+    if (!appartement_id || !locataire_id || !date_debut) {
+        console.log('ERREUR: Données manquantes');
+        return res.status(400).json({
+            success: false,
+            message: 'Appartement, locataire et date de début sont obligatoires'
+        });
+    }
+
+    // Vérifier que l'appartement et le locataire appartiennent à l'utilisateur
+    const checkQuery = `
+        SELECT a.id as apt_id, l.id as loc_id 
+        FROM appartements a, locataires l 
+        WHERE a.id = ? AND l.id = ? AND a.utilisateur_id = ? AND l.utilisateur_id = ?
+    `;
+    
+    db.query(checkQuery, [appartement_id, locataire_id, userId, userId], (err, checkResults) => {
+        if (err || checkResults.length === 0) {
+            console.log('ERREUR: Appartement ou locataire non trouvé');
+            return res.status(404).json({
+                success: false,
+                message: 'Appartement ou locataire non trouvé'
+            });
+        }
+
+        // Vérifier s'il y a déjà une location active pour cet appartement
+        const activeLocationQuery = `
+            SELECT id FROM locations 
+            WHERE appartement_id = ? AND statut = 'active'
+        `;
+
+        db.query(activeLocationQuery, [appartement_id], (err2, activeResults) => {
+            if (err2) {
+                return res.status(500).json({ success: false, message: 'Erreur serveur' });
+            }
+
+            // Si il y a déjà une location active et qu'on essaie de créer une nouvelle location active
+            if (activeResults.length > 0 && (!statut || statut === 'active')) {
+                console.log('ERREUR: Location active existante');
+                return res.status(400).json({
+                    success: false,
+                    message: 'Cet appartement a déjà une location active. Terminez-la d\'abord ou créez cette location avec un statut différent.'
+                });
+            }
+
+            const insertQuery = `
+                INSERT INTO locations (
+                    appartement_id, locataire_id, date_debut, date_fin,
+                    loyer_mensuel, charges_mensuelles, depot_garantie, statut
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `;
+
+            const values = [
+                appartement_id,
+                locataire_id,
+                date_debut,
+                date_fin || null,
+                parseFloat(loyer_mensuel) || null,
+                parseFloat(charges_mensuelles) || null,
+                parseFloat(depot_garantie) || null,
+                statut || 'active'
+            ];
+
+            console.log('Query:', insertQuery);
+            console.log('Values:', values);
+
+            db.query(insertQuery, values, (err3, result) => {
+                if (err3) {
+                    console.error('Erreur lors de la création de la location:', err3);
+                    return res.status(500).json({
+                        success: false,
+                        message: 'Erreur serveur: ' + err3.message
+                    });
+                }
+
+                console.log('Location créée avec succès, ID:', result.insertId);
+
+                // Mettre à jour le statut de l'appartement selon le statut de la location
+                const newApartmentStatus = (statut === 'active' || !statut) ? 'occupé' : 'libre';
+                db.query('UPDATE appartements SET statut = ? WHERE id = ?', [newApartmentStatus, appartement_id], (err4) => {
+                    if (err4) {
+                        console.error('Erreur lors de la mise à jour du statut:', err4);
+                    } else {
+                        console.log('Statut appartement mis à jour en:', newApartmentStatus);
+                    }
+                });
+
+                res.json({
+                    success: true,
+                    message: 'Location créée avec succès',
+                    id: result.insertId
+                });
+            });
+        });
+    });
+});
+
+// PUT - Modifier une location
+app.put('/locations/:id', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+    const {
+        appartement_id, locataire_id, date_debut, date_fin,
+        loyer_mensuel, charges_mensuelles, depot_garantie, statut
+    } = req.body;
+
+    // Vérifier que la location appartient à l'utilisateur
+    const checkQuery = `
+        SELECT loc.id, loc.appartement_id as old_appartement_id, loc.statut as old_statut
+        FROM locations loc
+        JOIN appartements a ON loc.appartement_id = a.id
+        WHERE loc.id = ? AND a.utilisateur_id = ?
+    `;
+
+    db.query(checkQuery, [id, userId], (err, checkResults) => {
+        if (err || checkResults.length === 0) {
+            return res.status(404).json({ success: false, message: 'Location non trouvée' });
+        }
+
+        const oldAppartementId = checkResults[0].old_appartement_id;
+        const oldStatut = checkResults[0].old_statut;
+
+        // Vérifier que le nouvel appartement et locataire appartiennent à l'utilisateur
+        const ownershipQuery = `
+            SELECT a.id as apt_id, l.id as loc_id 
+            FROM appartements a, locataires l 
+            WHERE a.id = ? AND l.id = ? AND a.utilisateur_id = ? AND l.utilisateur_id = ?
+        `;
+
+        db.query(ownershipQuery, [appartement_id, locataire_id, userId, userId], (err2, ownershipResults) => {
+            if (err2 || ownershipResults.length === 0) {
+                return res.status(404).json({ success: false, message: 'Appartement ou locataire non trouvé' });
+            }
+
+            // Déterminer le nouveau statut en fonction des dates
+            let newStatut = statut || 'active';
+            const today = new Date().toISOString().split('T')[0];
+            
+            if (date_fin && date_fin < today) {
+                newStatut = 'terminee';
+            } else if (date_debut > today || date_fin > today) {
+                newStatut = 'active'; // Location future mais on la garde active
+            }
+
+            const updateQuery = `
+                UPDATE locations SET
+                    appartement_id = ?,
+                    locataire_id = ?,
+                    date_debut = ?,
+                    date_fin = ?,
+                    loyer_mensuel = ?,
+                    charges_mensuelles = ?,
+                    depot_garantie = ?,
+                    statut = ?
+                WHERE id = ?
+            `;
+
+            const values = [
+                appartement_id,
+                locataire_id,
+                date_debut,
+                date_fin || null,
+                parseFloat(loyer_mensuel) || null,
+                parseFloat(charges_mensuelles) || null,
+                parseFloat(depot_garantie) || null,
+                newStatut,
+                id
+            ];
+
+            db.query(updateQuery, values, (err3, result) => {
+                if (err3) {
+                    console.error('Erreur modification location:', err3);
+                    return res.status(500).json({ success: false, message: 'Erreur serveur' });
+                }
+
+                // Fonction pour mettre à jour le statut d'un appartement
+                const updateApartmentStatus = (apartmentId) => {
+                    const statusQuery = `
+                        UPDATE appartements 
+                        SET statut = CASE 
+                            WHEN EXISTS (
+                                SELECT 1 FROM locations 
+                                WHERE appartement_id = ? AND statut = 'active'
+                            ) THEN 'occupé'
+                            WHEN statut = 'en_travaux' THEN 'en_travaux'
+                            ELSE 'libre'
+                        END
+                        WHERE id = ?
+                    `;
+                    
+                    db.query(statusQuery, [apartmentId, apartmentId], (err) => {
+                        if (err) {
+                            console.error(`Erreur mise à jour statut appartement ${apartmentId}:`, err);
+                        }
+                    });
+                };
+
+                // Mettre à jour les statuts des appartements
+                updateApartmentStatus(appartement_id);
+                if (oldAppartementId !== appartement_id) {
+                    updateApartmentStatus(oldAppartementId);
+                }
+
+                res.json({ success: true, message: 'Location modifiée avec succès' });
+            });
+        });
+    });
+});
+
+// DELETE - Supprimer une location
+app.delete('/locations/:id', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    // Récupérer les infos de la location avant suppression
+    const getLocationQuery = `
+        SELECT loc.appartement_id, loc.statut
+        FROM locations loc
+        JOIN appartements a ON loc.appartement_id = a.id
+        WHERE loc.id = ? AND a.utilisateur_id = ?
+    `;
+
+    db.query(getLocationQuery, [id, userId], (err, locationResults) => {
+        if (err || locationResults.length === 0) {
+            return res.status(404).json({ success: false, message: 'Location non trouvée' });
+        }
+
+        const { appartement_id, statut } = locationResults[0];
+
+        // Supprimer la location
+        db.query('DELETE FROM locations WHERE id = ?', [id], (err2, result) => {
+            if (err2) {
+                console.error('Erreur suppression location:', err2);
+                return res.status(500).json({ success: false, message: 'Erreur serveur' });
+            }
+
+            // Si c'était la location active, remettre l'appartement en libre
+            if (statut === 'active') {
+                // Vérifier s'il y a d'autres locations actives pour cet appartement
+                db.query(
+                    'SELECT COUNT(*) as count FROM locations WHERE appartement_id = ? AND statut = "active"',
+                    [appartement_id],
+                    (err3, countResults) => {
+                        if (!err3 && countResults[0].count === 0) {
+                            // Aucune location active restante, mettre l'appartement en libre
+                            db.query('UPDATE appartements SET statut = "libre" WHERE id = ?', [appartement_id], (err4) => {
+                                if (err4) {
+                                    console.error('Erreur mise à jour statut appartement:', err4);
+                                }
+                            });
+                        }
+                    }
+                );
+            }
+
+            res.json({ success: true, message: 'Location supprimée avec succès' });
+        });
+    });
+});
+
+// PUT - Terminer une location
+app.put('/locations/:id/terminate', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+    const { date_fin, statut } = req.body;
+
+    // Vérifier que la location appartient à l'utilisateur
+    const checkQuery = `
+        SELECT loc.appartement_id
+        FROM locations loc
+        JOIN appartements a ON loc.appartement_id = a.id
+        WHERE loc.id = ? AND a.utilisateur_id = ?
+    `;
+
+    db.query(checkQuery, [id, userId], (err, checkResults) => {
+        if (err || checkResults.length === 0) {
+            return res.status(404).json({ success: false, message: 'Location non trouvée' });
+        }
+
+        const appartement_id = checkResults[0].appartement_id;
+
+        const updateQuery = `
+            UPDATE locations SET
+                date_fin = ?,
+                statut = ?
+            WHERE id = ?
+        `;
+
+        db.query(updateQuery, [date_fin, statut || 'terminee', id], (err2, result) => {
+            if (err2) {
+                console.error('Erreur fin location:', err2);
+                return res.status(500).json({ success: false, message: 'Erreur serveur' });
+            }
+
+            // Mettre l'appartement en libre
+            db.query('UPDATE appartements SET statut = "libre" WHERE id = ?', [appartement_id], (err3) => {
+                if (err3) {
+                    console.error('Erreur mise à jour statut appartement:', err3);
+                }
+            });
+
+            res.json({ success: true, message: 'Location terminée avec succès' });
+        });
+    });
+});
+
+// GET - Récupérer toutes les locations (vue globale)
+app.get('/locations', authenticateToken, (req, res) => {
+    const userId = req.user.userId;
+    const { statut, appartement_id, locataire_id } = req.query;
+
+    let query = `
+        SELECT 
+            loc.*,
+            a.titre as appartement_titre,
+            a.adresse_complete as appartement_adresse,
+            l.nom as locataire_nom,
+            l.prenom as locataire_prenom,
+            l.email as locataire_email,
+            l.telephone as locataire_telephone
+        FROM locations loc
+        JOIN appartements a ON loc.appartement_id = a.id
+        JOIN locataires l ON loc.locataire_id = l.id
+        WHERE a.utilisateur_id = ?
+    `;
+
+    const queryParams = [userId];
+
+    // Filtres optionnels
+    if (statut) {
+        query += ' AND loc.statut = ?';
+        queryParams.push(statut);
+    }
+
+    if (appartement_id) {
+        query += ' AND loc.appartement_id = ?';
+        queryParams.push(appartement_id);
+    }
+
+    if (locataire_id) {
+        query += ' AND loc.locataire_id = ?';
+        queryParams.push(locataire_id);
+    }
+
+    query += ' ORDER BY loc.date_debut DESC';
+
+    db.query(query, queryParams, (err, results) => {
+        if (err) {
+            console.error('Erreur récupération locations:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+
+        res.json({ success: true, data: results });
+    });
+});
+
+// GET - Statistiques globales des locations
+app.get('/locations/stats', authenticateToken, (req, res) => {
+    const userId = req.user.userId;
+
+    const statsQuery = `
+        SELECT 
+            COUNT(*) as total_locations,
+            COUNT(CASE WHEN loc.statut = 'active' THEN 1 END) as locations_actives,
+            COUNT(CASE WHEN loc.statut = 'terminee' THEN 1 END) as locations_terminees,
+            COUNT(CASE WHEN loc.statut = 'resiliee' THEN 1 END) as locations_resiliees,
+            AVG(loc.loyer_mensuel) as loyer_moyen,
+            SUM(CASE WHEN loc.statut = 'active' THEN loc.loyer_mensuel ELSE 0 END) as revenus_mensuels_totaux,
+            COUNT(DISTINCT loc.appartement_id) as appartements_avec_locations,
+            COUNT(DISTINCT loc.locataire_id) as locataires_uniques
+        FROM locations loc
+        JOIN appartements a ON loc.appartement_id = a.id
+        WHERE a.utilisateur_id = ?
+    `;
+
+    db.query(statsQuery, [userId], (err, results) => {
+        if (err) {
+            console.error('Erreur récupération statistiques globales:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+
+        res.json({ success: true, data: results[0] });
+    });
+});
+// backend/index.js - PARTIE 5/6 : Routes Documents, Paiements et Factures
+
+// ========================= ROUTES DOCUMENTS =========================
+
+// POST - Upload de documents
+app.post('/documents', authenticateToken, upload.single('document'), (req, res) => {
+    const userId = req.user.userId;
+    const { appartement_id, locataire_id, location_id, nom_document, type_document, description } = req.body;
+    const file = req.file;
+
+    if (!file) {
+        return res.status(400).json({ success: false, message: 'Aucun fichier uploadé' });
+    }
+
+    // Vérifier l'ownership si appartement_id ou locataire_id est fourni
+    let ownershipCheck = Promise.resolve(true);
+    
+    if (appartement_id) {
+        ownershipCheck = new Promise((resolve) => {
+            db.query('SELECT id FROM appartements WHERE id = ? AND utilisateur_id = ?', [appartement_id, userId], (err, results) => {
+                resolve(!err && results.length > 0);
+            });
+        });
+    } else if (locataire_id) {
+        ownershipCheck = new Promise((resolve) => {
+            db.query('SELECT id FROM locataires WHERE id = ? AND utilisateur_id = ?', [locataire_id, userId], (err, results) => {
+                resolve(!err && results.length > 0);
+            });
+        });
+    }
+
+    ownershipCheck.then(isOwner => {
+        if (!isOwner) {
+            return res.status(404).json({ success: false, message: 'Ressource non trouvée' });
+        }
+
+        const query = `
+            INSERT INTO documents (
+                appartement_id, locataire_id, location_id, nom_document, 
+                type_document, chemin_fichier, url, description
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+
+        db.query(query, [
+            appartement_id || null, locataire_id || null, location_id || null,
+            nom_document, type_document, file.path, `uploads/${file.filename}`, description
+        ], (err, result) => {
+            if (err) {
+                console.error('Erreur lors de l\'upload du document:', err);
+                return res.status(500).json({ success: false, message: 'Erreur serveur' });
+            }
+
+            res.json({ 
+                success: true, 
+                message: 'Document uploadé avec succès',
+                id: result.insertId 
+            });
+        });
+    });
+});
+
+// DELETE - Supprimer un document
+app.delete('/documents/:id', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    // Vérifier ownership via les tables liées
+    const checkQuery = `
+        SELECT d.chemin_fichier 
+        FROM documents d
+        LEFT JOIN appartements a ON d.appartement_id = a.id
+        LEFT JOIN locataires l ON d.locataire_id = l.id
+        WHERE d.id = ? AND (a.utilisateur_id = ? OR l.utilisateur_id = ?)
+    `;
+
+    db.query(checkQuery, [id, userId, userId], (err, results) => {
+        if (err) {
+            console.error('Erreur récupération document:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+
+        if (results.length === 0) {
+            return res.status(404).json({ success: false, message: 'Document non trouvé' });
+        }
+
+        const filePath = results[0].chemin_fichier;
+        
+        // Supprimer le fichier physique
+        fs.unlink(filePath, (err) => {
+            if (err) console.error('Erreur suppression fichier:', err);
+        });
+
+        // Supprimer de la base de données
+        db.query('DELETE FROM documents WHERE id = ?', [id], (err, result) => {
+            if (err) {
+                console.error('Erreur suppression document BDD:', err);
+                return res.status(500).json({ success: false, message: 'Erreur serveur' });
+            }
+
+            res.json({ success: true, message: 'Document supprimé avec succès' });
+        });
+    });
+});
+
+// ========================= ROUTES PAIEMENTS =========================
+
+// POST - Créer un nouveau paiement
+app.post('/payments', authenticateToken, (req, res) => {
+    const userId = req.user.userId;
+    const {
+        locataire_id, appartement_id, location_id, type_paiement,
+        montant, date_paiement, methode_paiement, description
+    } = req.body;
+
+    // Vérifier ownership du locataire
+    db.query('SELECT id FROM locataires WHERE id = ? AND utilisateur_id = ?', [locataire_id, userId], (err, checkResults) => {
+        if (err || checkResults.length === 0) {
+            return res.status(404).json({ success: false, message: 'Locataire non trouvé' });
+        }
+
+        const query = `
+            INSERT INTO paiements (
+                locataire_id, appartement_id, location_id, type_paiement,
+                montant, date_paiement, methode_paiement, description
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+
+        db.query(query, [
+            locataire_id, appartement_id || null, location_id || null,
+            type_paiement, montant, date_paiement, methode_paiement, description
+        ], (err, result) => {
+            if (err) {
+                console.error('Erreur lors de la création du paiement:', err);
+                return res.status(500).json({ success: false, message: 'Erreur serveur' });
+            }
+
+            res.json({ 
+                success: true, 
+                message: 'Paiement enregistré avec succès',
+                id: result.insertId 
+            });
+        });
+    });
+});
+
+// ========================= ROUTES FACTURES =========================
+
+// POST - Créer une nouvelle facture
+app.post('/invoices', authenticateToken, (req, res) => {
+    const userId = req.user.userId;
+    const {
+        appartement_id, location_id, type_facture, numero_facture,
+        montant, date_facture, date_echeance, statut, description
+    } = req.body;
+
+    // Vérifier ownership de l'appartement
+    db.query('SELECT id FROM appartements WHERE id = ? AND utilisateur_id = ?', [appartement_id, userId], (err, checkResults) => {
+        if (err || checkResults.length === 0) {
+            return res.status(404).json({ success: false, message: 'Appartement non trouvé' });
+        }
+
+        const query = `
+            INSERT INTO factures (
+                appartement_id, location_id, type_facture, numero_facture,
+                montant, date_facture, date_echeance, statut, description
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+
+        db.query(query, [
+            appartement_id, location_id, type_facture, numero_facture,
+            montant, date_facture, date_echeance, statut, description
+        ], (err, result) => {
+            if (err) {
+                console.error('Erreur lors de la création de la facture:', err);
+                return res.status(500).json({ success: false, message: 'Erreur serveur' });
+            }
+
+            res.json({ 
+                success: true, 
+                message: 'Facture créée avec succès',
+                id: result.insertId 
+            });
+        });
+    });
+});
+
+// ========================= ROUTES EXPORT =========================
+
+// GET - Exporter toutes les données de l'utilisateur
+app.get('/export/data', authenticateToken, async (req, res) => {
+    const userId = req.user.userId;
+
+    try {
+        const exportData = {};
+
+        // Récupérer toutes les données de l'utilisateur
+        const queries = {
+            utilisateur: 'SELECT * FROM utilisateurs WHERE id = ?',
+            appartements: 'SELECT * FROM appartements WHERE utilisateur_id = ?',
+            locataires: 'SELECT * FROM locataires WHERE utilisateur_id = ?',
+            locations: `
+                SELECT loc.* FROM locations loc
+                JOIN appartements a ON loc.appartement_id = a.id
+                WHERE a.utilisateur_id = ?
+            `,
+            documents: `
+                SELECT d.* FROM documents d
+                LEFT JOIN appartements a ON d.appartement_id = a.id
+                LEFT JOIN locataires l ON d.locataire_id = l.id
+                WHERE a.utilisateur_id = ? OR l.utilisateur_id = ?
+            `,
+            medias: `
+                SELECT m.* FROM medias m
+                JOIN appartements a ON m.appartement_id = a.id
+                WHERE a.utilisateur_id = ?
+            `,
+            paiements: `
+                SELECT p.* FROM paiements p
+                JOIN locataires l ON p.locataire_id = l.id
+                WHERE l.utilisateur_id = ?
+            `,
+            factures: `
+                SELECT f.* FROM factures f
+                JOIN appartements a ON f.appartement_id = a.id
+                WHERE a.utilisateur_id = ?
+            `
+        };
+
+        const promises = Object.entries(queries).map(([key, query]) => {
+            return new Promise((resolve, reject) => {
+                const params = key === 'documents' ? [userId, userId] : [userId];
+                db.query(query, params, (err, results) => {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        exportData[key] = results;
+                        resolve();
+                    }
+                });
+            });
+        });
+
+        await Promise.all(promises);
+
+        // Supprimer les mots de passe et informations sensibles
+        if (exportData.utilisateur && exportData.utilisateur[0]) {
+            delete exportData.utilisateur[0].password;
+        }
+
+        // Ajouter metadata
+        exportData.metadata = {
+            export_date: new Date().toISOString(),
+            version: '2.0',
+            user_id: userId
+        };
+
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Content-Disposition', `attachment; filename="gestion-locative-export-${userId}-${new Date().toISOString().split('T')[0]}.json"`);
+        res.json(exportData);
+
+    } catch (error) {
+        console.error('Erreur export données:', error);
+        res.status(500).json({ success: false, message: 'Erreur lors de l\'export' });
+    }
+});
+
+// ========================= ROUTE DEBUG POUR TESTER =========================
+
+// GET - Route de debug pour voir toutes les données d'un appartement
+app.get('/debug/apartments/:id', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    console.log('🐛 DEBUG - Appartement:', id, 'User:', userId);
+
+    const debugData = {};
+
+    // Vérifier l'appartement
+    db.query('SELECT * FROM appartements WHERE id = ? AND utilisateur_id = ?', [id, userId], (err, apartment) => {
+        if (err || apartment.length === 0) {
+            return res.json({ error: 'Appartement non trouvé', apartment_exists: false });
+        }
+
+        debugData.apartment = apartment[0];
+
+        // Vérifier les locataires
+        const locatairesQuery = `
+            SELECT l.*, loc.* FROM locataires l
+            JOIN locations loc ON l.id = loc.locataire_id
+            WHERE loc.appartement_id = ?
+        `;
+
+        db.query(locatairesQuery, [id], (err2, locataires) => {
+            debugData.locataires = {
+                count: locataires ? locataires.length : 0,
+                data: locataires || [],
+                error: err2 ? err2.message : null
+            };
+
+            // Vérifier les médias
+            db.query('SELECT * FROM medias WHERE appartement_id = ?', [id], (err3, medias) => {
+                debugData.medias = {
+                    count: medias ? medias.length : 0,
+                    data: medias || [],
+                    error: err3 ? err3.message : null
+                };
+
+                // Vérifier les documents
+                db.query('SELECT * FROM documents WHERE appartement_id = ?', [id], (err4, documents) => {
+                    debugData.documents = {
+                        count: documents ? documents.length : 0,
+                        data: documents || [],
+                        error: err4 ? err4.message : null
+                    };
+
+                    // Vérifier les factures
+                    db.query('SELECT * FROM factures WHERE appartement_id = ?', [id], (err5, factures) => {
+                        debugData.factures = {
+                            count: factures ? factures.length : 0,
+                            data: factures || [],
+                            error: err5 ? err5.message : null
+                        };
+
+                        console.log('🐛 DEBUG COMPLET:', JSON.stringify(debugData, null, 2));
+                        res.json(debugData);
+                    });
+                });
+            });
+        });
+    });
+});
+
+// ========================= VÉRIFICATION DES TABLES =========================
+
+// GET - Vérifier la structure des tables (debug)
+app.get('/debug/tables', authenticateToken, (req, res) => {
+    const tables = ['appartements', 'locataires', 'locations', 'medias', 'documents', 'factures'];
+    const results = {};
+
+    let completed = 0;
+    
+    tables.forEach(table => {
+        db.query(`DESCRIBE ${table}`, (err, columns) => {
+            results[table] = {
+                exists: !err,
+                columns: columns || [],
+                error: err ? err.message : null
+            };
+
+            db.query(`SELECT COUNT(*) as count FROM ${table}`, (err2, count) => {
+                results[table].count = err2 ? 0 : count[0].count;
+                
+                completed++;
+                if (completed === tables.length) {
+                    res.json(results);
+                }
+            });
+        });
+    });
+});
+
+// ========================= NOUVELLE ROUTE POUR LES STATISTIQUES DASHBOARD =========================
+
+// GET - Statistiques complètes pour le dashboard
+app.get('/dashboard/stats', authenticateToken, (req, res) => {
+    const userId = req.user.userId;
+    
+    const statsQuery = `
+        SELECT 
+            -- Statistiques appartements
+            COUNT(DISTINCT a.id) as total_apartments,
+            COUNT(DISTINCT CASE WHEN a.statut = 'occupé' THEN a.id END) as occupied_apartments,
+            COUNT(DISTINCT CASE WHEN a.statut = 'libre' THEN a.id END) as vacant_apartments,
+            COUNT(DISTINCT CASE WHEN a.statut = 'en_travaux' THEN a.id END) as under_work_apartments,
+            
+            -- Revenus
+            COALESCE(SUM(CASE WHEN loc.statut = 'active' THEN loc.loyer_mensuel ELSE 0 END), 0) as monthly_revenue,
+            COALESCE(AVG(CASE WHEN a.prix_loyer > 0 THEN a.prix_loyer END), 0) as average_rent,
+            
+            -- Locataires
+            COUNT(DISTINCT l.id) as total_tenants,
+            COUNT(DISTINCT CASE WHEN loc.statut = 'active' THEN l.id END) as active_tenants,
+            
+            -- Taux d'occupation
+            CASE 
+                WHEN COUNT(DISTINCT a.id) > 0 
+                THEN (COUNT(DISTINCT CASE WHEN a.statut = 'occupé' THEN a.id END) * 100.0 / COUNT(DISTINCT a.id))
+                ELSE 0 
+            END as occupancy_rate
+            
+        FROM appartements a
+        LEFT JOIN locations loc ON a.id = loc.appartement_id AND loc.statut = 'active'
+        LEFT JOIN locataires l ON loc.locataire_id = l.id
+        WHERE a.utilisateur_id = ?
+    `;
+    
+    db.query(statsQuery, [userId], (err, results) => {
+        if (err) {
+            console.error('Erreur récupération statistiques:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+        
+        const stats = results[0] || {};
+        
+        // Calculs additionnels
+        stats.annual_revenue = stats.monthly_revenue * 12;
+        stats.occupancy_rate = Math.round(stats.occupancy_rate * 100) / 100; // Arrondir à 2 décimales
+        
+        res.json({ 
+            success: true, 
+            data: stats 
+        });
+    });
+});
+
+// GET - Données pour le graphique des revenus (12 derniers mois)
+app.get('/dashboard/revenue-chart', authenticateToken, (req, res) => {
+    const userId = req.user.userId;
+    
+    // Générer les 12 derniers mois
+    const months = [];
+    for (let i = 11; i >= 0; i--) {
+        const date = new Date();
+        date.setMonth(date.getMonth() - i);
+        months.push({
+            year: date.getFullYear(),
+            month: date.getMonth() + 1,
+            label: date.toLocaleDateString('fr-FR', { month: 'short', year: 'numeric' })
+        });
+    }
+    
+    // Pour cet exemple, on simule les données car il faudrait un système de tracking des revenus historiques
+    // En production, vous pourriez avoir une table `revenus_mensuels` ou calculer à partir des paiements
+    const revenueQuery = `
+        SELECT 
+            COALESCE(SUM(CASE WHEN loc.statut = 'active' THEN loc.loyer_mensuel ELSE 0 END), 0) as current_revenue
+        FROM appartements a
+        LEFT JOIN locations loc ON a.id = loc.appartement_id AND loc.statut = 'active'
+        WHERE a.utilisateur_id = ?
+    `;
+    
+    db.query(revenueQuery, [userId], (err, results) => {
+        if (err) {
+            console.error('Erreur récupération revenus:', err);
+            return res.status(500).json({ success: false, message: 'Erreur serveur' });
+        }
+        
+        const currentRevenue = results[0]?.current_revenue || 0;
+        
+        // Simuler les données historiques (en production, utiliser de vraies données)
+        const revenueData = months.map((month, index) => {
+            const isCurrentOrPast = index <= 11; // Tous les mois jusqu'à maintenant
+            const variation = (Math.random() - 0.5) * 0.2; // ±10% variation
+            const revenue = isCurrentOrPast ? Math.max(0, currentRevenue * (1 + variation)) : 0;
+            
+            return {
+                month: month.label,
+                revenue: Math.round(revenue),
+                target: Math.round(currentRevenue)
+            };
+        });
+        
+        res.json({ 
+            success: true, 
+            data: revenueData 
+        });
+    });
+});
+
+// ========================= NOUVELLE ROUTE POUR FORCER LA SYNCHRONISATION =========================
+
+// GET - Synchroniser manuellement les statuts (pour debug/admin)
+app.get('/admin/sync-statuses', authenticateToken, (req, res) => {
+    console.log('🔄 Synchronisation manuelle demandée par utilisateur:', req.user.userId);
+    
+    try {
+        // Lancer la synchronisation
+        synchronizeAllStatuses();
+        
+        res.json({ 
+            success: true, 
+            message: 'Synchronisation des statuts lancée avec succès' 
+        });
+        
+        console.log('✅ Synchronisation manuelle lancée avec succès');
+    } catch (error) {
+        console.error('❌ Erreur synchronisation manuelle:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Erreur lors de la synchronisation: ' + error.message 
+        });
+    }
+});
+
+// ========================= ROUTES STATIQUES =========================
+
+// Servir les fichiers statiques
+app.use('/gestion-locative', express.static(path.join(__dirname)));
+
+// Route par défaut pour servir le frontend
+app.get('/gestion-locative/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+// backend/index.js - PARTIE 6/6 : Création des Tables et Démarrage du Serveur
+
+// ========================= SCRIPT DE CRÉATION DES TABLES =========================
+
+function createOrUpdateTables() {
+    const tables = {
+        utilisateurs: {
+            create: `
+                CREATE TABLE utilisateurs (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    nom VARCHAR(100) NOT NULL,
+                    prenom VARCHAR(100) NOT NULL,
+                    email VARCHAR(255) UNIQUE NOT NULL,
+                    password VARCHAR(255) NOT NULL,
+                    telephone VARCHAR(20),
+                    entreprise VARCHAR(255),
+                    devise VARCHAR(3) DEFAULT 'EUR',
+                    langue VARCHAR(2) DEFAULT 'fr',
+                    notifications_email BOOLEAN DEFAULT TRUE,
+                    notifications_retards BOOLEAN DEFAULT TRUE,
+                    sauvegarde_auto BOOLEAN DEFAULT TRUE,
+                    taux_tva DECIMAL(5,2) DEFAULT 20.00,
+                    frais_gestion DECIMAL(5,2) DEFAULT 8.00,
+                    commission_agence DECIMAL(5,2) DEFAULT 0.00,
+                    date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    derniere_connexion TIMESTAMP NULL,
+                    date_modification TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+            `,
+            alters: [
+                `ADD COLUMN IF NOT EXISTS telephone VARCHAR(20)`,
+                `ADD COLUMN IF NOT EXISTS entreprise VARCHAR(255)`,
+                `ADD COLUMN IF NOT EXISTS devise VARCHAR(3) DEFAULT 'EUR'`,
+                `ADD COLUMN IF NOT EXISTS langue VARCHAR(2) DEFAULT 'fr'`,
+                `ADD COLUMN IF NOT EXISTS notifications_email BOOLEAN DEFAULT TRUE`,
+                `ADD COLUMN IF NOT EXISTS notifications_retards BOOLEAN DEFAULT TRUE`,
+                `ADD COLUMN IF NOT EXISTS sauvegarde_auto BOOLEAN DEFAULT TRUE`,
+                `ADD COLUMN IF NOT EXISTS taux_tva DECIMAL(5,2) DEFAULT 20.00`,
+                `ADD COLUMN IF NOT EXISTS frais_gestion DECIMAL(5,2) DEFAULT 8.00`,
+                `ADD COLUMN IF NOT EXISTS commission_agence DECIMAL(5,2) DEFAULT 0.00`,
+                `ADD COLUMN IF NOT EXISTS derniere_connexion TIMESTAMP NULL`
+            ]
+        },
+        appartements: {
+            create: `
+                CREATE TABLE appartements (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    utilisateur_id INT NOT NULL,
+                    titre VARCHAR(255) NOT NULL,
+                    adresse_complete TEXT NOT NULL,
+                    code_postal VARCHAR(10),
+                    ville VARCHAR(100),
+                    surface DECIMAL(10,2),
+                    nb_pieces INT,
+                    nb_chambres INT,
+                    prix_loyer DECIMAL(10,2),
+                    charges DECIMAL(10,2),
+                    depot_garantie DECIMAL(10,2),
+                    statut ENUM('libre', 'occupé', 'en_travaux') DEFAULT 'libre',
+                    description TEXT,
+                    photo_principale VARCHAR(500),
+                    date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    date_modification TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    FOREIGN KEY (utilisateur_id) REFERENCES utilisateurs(id) ON DELETE CASCADE
+                )
+            `,
+            alters: [
+                `ADD COLUMN IF NOT EXISTS utilisateur_id INT`,
+                `ADD COLUMN IF NOT EXISTS code_postal VARCHAR(10)`,
+                `ADD COLUMN IF NOT EXISTS ville VARCHAR(100)`,
+                `ADD COLUMN IF NOT EXISTS surface DECIMAL(10,2)`,
+                `ADD COLUMN IF NOT EXISTS nb_pieces INT`,
+                `ADD COLUMN IF NOT EXISTS nb_chambres INT`,
+                `ADD COLUMN IF NOT EXISTS prix_loyer DECIMAL(10,2)`,
+                `ADD COLUMN IF NOT EXISTS charges DECIMAL(10,2)`,
+                `ADD COLUMN IF NOT EXISTS depot_garantie DECIMAL(10,2)`,
+                `ADD COLUMN IF NOT EXISTS statut ENUM('libre','occupé','en_travaux') DEFAULT 'libre'`,
+                `ADD COLUMN IF NOT EXISTS description TEXT`,
+                `ADD COLUMN IF NOT EXISTS photo_principale VARCHAR(500)`
+            ]
+        },
+        locataires: {
+            create: `
+                CREATE TABLE locataires (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    utilisateur_id INT NOT NULL,
+                    nom VARCHAR(100) NOT NULL,
+                    prenom VARCHAR(100) NOT NULL,
+                    email VARCHAR(255),
+                    telephone VARCHAR(20),
+                    date_naissance DATE,
+                    profession VARCHAR(255),
+                    salaire DECIMAL(10,2),
+                    date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    date_modification TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    FOREIGN KEY (utilisateur_id) REFERENCES utilisateurs(id) ON DELETE CASCADE
+                )
+            `,
+            alters: [
+                `ADD COLUMN IF NOT EXISTS utilisateur_id INT`,
+                `ADD COLUMN IF NOT EXISTS email VARCHAR(255)`,
+                `ADD COLUMN IF NOT EXISTS telephone VARCHAR(20)`,
+                `ADD COLUMN IF NOT EXISTS date_naissance DATE`,
+                `ADD COLUMN IF NOT EXISTS profession VARCHAR(255)`,
+                `ADD COLUMN IF NOT EXISTS salaire DECIMAL(10,2)`
+            ]
+        },
+        locations: {
+            create: `
+                CREATE TABLE locations (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    appartement_id INT NOT NULL,
+                    locataire_id INT NOT NULL,
+                    date_debut DATE NOT NULL,
+                    date_fin DATE,
+                    loyer_mensuel DECIMAL(10,2) NOT NULL,
+                    charges_mensuelles DECIMAL(10,2),
+                    depot_garantie DECIMAL(10,2),
+                    statut ENUM('active','terminee','resiliee') DEFAULT 'active',
+                    date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    date_modification TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    FOREIGN KEY (appartement_id) REFERENCES appartements(id) ON DELETE CASCADE,
+                    FOREIGN KEY (locataire_id) REFERENCES locataires(id) ON DELETE CASCADE
+                )
+            `,
+            alters: [
+                `ADD COLUMN IF NOT EXISTS charges_mensuelles DECIMAL(10,2)`,
+                `ADD COLUMN IF NOT EXISTS depot_garantie DECIMAL(10,2)`,
+                `ADD COLUMN IF NOT EXISTS statut ENUM('active','terminee','resiliee') DEFAULT 'active'`,
+                `ADD COLUMN IF NOT EXISTS date_modification TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`
+            ]
+        },
+        medias: {
+            create: `
+                CREATE TABLE medias (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    appartement_id INT NOT NULL,
+                    nom_fichier VARCHAR(255) NOT NULL,
+                    chemin_fichier TEXT NOT NULL,
+                    url VARCHAR(500),
+                    type_media ENUM('photo','video') NOT NULL,
+                    ordre_affichage INT DEFAULT 0,
+                    date_upload TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (appartement_id) REFERENCES appartements(id) ON DELETE CASCADE
+                )
+            `,
+            alters: [
+                `ADD COLUMN IF NOT EXISTS ordre_affichage INT DEFAULT 0`,
+                `ADD COLUMN IF NOT EXISTS url VARCHAR(500)`
+            ]
+        },
+        documents: {
+            create: `
+                CREATE TABLE documents (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    appartement_id INT,
+                    locataire_id INT,
+                    location_id INT,
+                    nom_document VARCHAR(255) NOT NULL,
+                    type_document ENUM(
+                      'piece_identite','bulletin_salaire','justificatif_domicile',
+                      'document_garant','contrat_travail','avis_imposition',
+                      'bail','etat_lieux','assurance','facture','quittance','autre'
+                    ) NOT NULL,
+                    chemin_fichier TEXT NOT NULL,
+                    url VARCHAR(500),
+                    description TEXT,
+                    date_upload TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (appartement_id) REFERENCES appartements(id) ON DELETE CASCADE,
+                    FOREIGN KEY (locataire_id) REFERENCES locataires(id) ON DELETE CASCADE,
+                    FOREIGN KEY (location_id) REFERENCES locations(id) ON DELETE CASCADE
+                )
+            `,
+            alters: [
+                `ADD COLUMN IF NOT EXISTS description TEXT`,
+                `ADD COLUMN IF NOT EXISTS url VARCHAR(500)`
+            ]
+        },
+        paiements: {
+            create: `
+                CREATE TABLE paiements (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    locataire_id INT NOT NULL,
+                    appartement_id INT,
+                    location_id INT,
+                    type_paiement ENUM('loyer','charges','depot_garantie','autre') NOT NULL,
+                    montant DECIMAL(10,2) NOT NULL,
+                    date_paiement DATE NOT NULL,
+                    methode_paiement ENUM('virement','cheque','especes','carte') NOT NULL,
+                    description TEXT,
+                    date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (locataire_id) REFERENCES locataires(id) ON DELETE CASCADE,
+                    FOREIGN KEY (appartement_id) REFERENCES appartements(id) ON DELETE SET NULL,
+                    FOREIGN KEY (location_id) REFERENCES locations(id) ON DELETE SET NULL
+                )
+            `,
+            alters: [
+                `ADD COLUMN IF NOT EXISTS description TEXT`
+            ]
+        },
+        factures: {
+            create: `
+                CREATE TABLE factures (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    appartement_id INT,
+                    location_id INT,
+                    type_facture ENUM('loyer','charges','travaux','assurance','autre') NOT NULL,
+                    numero_facture VARCHAR(100),
+                    montant DECIMAL(10,2) NOT NULL,
+                    date_facture DATE NOT NULL,
+                    date_echeance DATE,
+                    statut ENUM('en_attente','payée','en_retard','annulée') DEFAULT 'en_attente',
+                    description TEXT,
+                    date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (appartement_id) REFERENCES appartements(id) ON DELETE CASCADE,
+                    FOREIGN KEY (location_id) REFERENCES locations(id) ON DELETE SET NULL
+                )
+            `,
+            alters: [
+                `ADD COLUMN IF NOT EXISTS numero_facture VARCHAR(100)`,
+                `ADD COLUMN IF NOT EXISTS date_echeance DATE`,
+                `ADD COLUMN IF NOT EXISTS statut ENUM('en_attente','payée','en_retard','annulée') DEFAULT 'en_attente'`,
+                `ADD COLUMN IF NOT EXISTS description TEXT`
+            ]
+        }
+    };
+
+    Object.entries(tables).forEach(([tableName, config]) => {
+        db.query(`SHOW TABLES LIKE '${tableName}'`, (err, result) => {
+            if (err) {
+                console.error(`Erreur vérification table ${tableName}:`, err);
+                return;
+            }
+
+            if (result.length === 0) {
+                // Création table
+                db.query(config.create, (err2) => {
+                    if (err2) {
+                        console.error(`Erreur création ${tableName}:`, err2);
+                    } else {
+                        console.log(`✅ Table ${tableName} créée.`);
+                    }
+                });
+            } else {
+                // Table existante : apply ALTERs
+                config.alters.forEach(alter => {
+                    const query = `ALTER TABLE ${tableName} ${alter}`;
+                    db.query(query, (err3) => {
+                        if (err3 && !/Duplicate column/.test(err3.message)) {
+                            console.error(`Erreur ALTER ${tableName}:`, err3);
+                        }
+                    });
+                });
+                console.log(`✅ Table ${tableName} mise à jour.`);
+            }
+        });
+    });
+
+    // Ajouter les contraintes de clé étrangère si nécessaire
+    setTimeout(() => {
+        const foreignKeys = [
+            {
+                table: 'appartements',
+                constraint: 'fk_appartements_utilisateur',
+                sql: `ALTER TABLE appartements ADD CONSTRAINT fk_appartements_utilisateur 
+                      FOREIGN KEY (utilisateur_id) REFERENCES utilisateurs(id) ON DELETE CASCADE`
+            },
+            {
+                table: 'locataires',
+                constraint: 'fk_locataires_utilisateur',
+                sql: `ALTER TABLE locataires ADD CONSTRAINT fk_locataires_utilisateur 
+                      FOREIGN KEY (utilisateur_id) REFERENCES utilisateurs(id) ON DELETE CASCADE`
+            }
+        ];
+
+        foreignKeys.forEach(fk => {
+            db.query(fk.sql, (err) => {
+                if (err && !err.message.includes('already exists')) {
+                    console.error(`Erreur ajout contrainte ${fk.constraint}:`, err.message);
+                } else if (!err) {
+                    console.log(`✅ Contrainte ${fk.constraint} ajoutée.`);
+                }
+            });
+        });
+    }, 2000);
+
+    // Ajouter les index pour améliorer les performances
+    setTimeout(() => {
+        const indexes = [
+            'CREATE INDEX IF NOT EXISTS idx_locations_statut ON locations(statut)',
+            'CREATE INDEX IF NOT EXISTS idx_locations_appartement_statut ON locations(appartement_id, statut)',
+            'CREATE INDEX IF NOT EXISTS idx_locations_locataire_statut ON locations(locataire_id, statut)',
+            'CREATE INDEX IF NOT EXISTS idx_locations_dates ON locations(date_debut, date_fin)',
+            'CREATE INDEX IF NOT EXISTS idx_appartements_statut ON appartements(statut)',
+            'CREATE INDEX IF NOT EXISTS idx_appartements_utilisateur ON appartements(utilisateur_id)',
+            'CREATE INDEX IF NOT EXISTS idx_locataires_utilisateur ON locataires(utilisateur_id)',
+            'CREATE INDEX IF NOT EXISTS idx_paiements_locataire ON paiements(locataire_id)',
+            'CREATE INDEX IF NOT EXISTS idx_documents_appartement ON documents(appartement_id)',
+            'CREATE INDEX IF NOT EXISTS idx_documents_locataire ON documents(locataire_id)'
+        ];
+
+        indexes.forEach(indexQuery => {
+            db.query(indexQuery, (err) => {
+                if (err && !err.message.includes('already exists')) {
+                    console.error('Erreur création index:', err.message);
+                }
+            });
+        });
+        console.log('✅ Index de performance créés.');
+    }, 3000);
+
+    // Mettre à jour les données existantes pour s'assurer de la cohérence
+    setTimeout(() => {
+        // Mettre à jour les statuts des locations existantes
+        db.query(`
+            UPDATE locations 
+            SET statut = 'active' 
+            WHERE statut IS NULL AND (date_fin IS NULL OR date_fin > CURDATE())
+        `);
+
+        db.query(`
+            UPDATE locations 
+            SET statut = 'terminee' 
+            WHERE statut IS NULL AND date_fin IS NOT NULL AND date_fin <= CURDATE()
+        `);
+
+        // Synchroniser les statuts des appartements avec les locations
+        db.query(`
+            UPDATE appartements a
+            SET statut = CASE 
+                WHEN EXISTS (
+                    SELECT 1 FROM locations l 
+                    WHERE l.appartement_id = a.id AND l.statut = 'active'
+                ) THEN 'occupé'
+                ELSE 'libre'
+            END
+        `);
+
+        console.log('✅ Données existantes mises à jour pour cohérence.');
+    }, 4000);
+}
+
+// ========================= MIDDLEWARE D'ERREURS =========================
+
+// Gestion des erreurs globales
+app.use((err, req, res, next) => {
+    console.error('Erreur:', err.stack);
+    res.status(500).json({ 
+        success: false, 
+        message: 'Erreur interne du serveur' 
+    });
+});
+
+// Gestion des erreurs 404
+app.use((req, res) => {
+    res.status(404).json({
+        success: false,
+        message: 'Route non trouvée'
+    });
+});
+
+// ========================= DÉMARRAGE DU SERVEUR =========================
+
+// Créer les tables au démarrage
+setTimeout(() => {
+    createOrUpdateTables();
+}, 1000);
+
+// ========================= GESTION AUTOMATIQUE DES STATUTS =========================
+
+// Fonction pour mettre à jour les statuts des locations expirées
+const updateExpiredLocations = () => {
+    const today = new Date().toISOString().split('T')[0];
+    
+    // Mettre à jour les locations expirées (date_fin < aujourd'hui et statut = 'active')
+    const updateLocationQuery = `
+        UPDATE locations 
+        SET statut = 'terminee' 
+        WHERE date_fin < ? AND statut = 'active'
+    `;
+    
+    db.query(updateLocationQuery, [today], (err, result) => {
+        if (err) {
+            console.error('Erreur mise à jour locations expirées:', err);
+            return;
+        }
+        
+        if (result.affectedRows > 0) {
+            console.log(`✅ ${result.affectedRows} location(s) expirée(s) mise(s) à jour`);
+            
+            // Mettre à jour les statuts des appartements correspondants
+            const updateApartmentQuery = `
+                UPDATE appartements a
+                SET statut = CASE 
+                    WHEN EXISTS (
+                        SELECT 1 FROM locations l 
+                        WHERE l.appartement_id = a.id AND l.statut = 'active'
+                    ) THEN 'occupé'
+                    ELSE 'libre'
+                END
+                WHERE a.id IN (
+                    SELECT DISTINCT appartement_id 
+                    FROM locations 
+                    WHERE date_fin < ? AND statut = 'terminee'
+                )
+            `;
+            
+            db.query(updateApartmentQuery, [today], (err2, result2) => {
+                if (err2) {
+                    console.error('Erreur mise à jour statuts appartements:', err2);
+                } else {
+                    console.log(`✅ ${result2.affectedRows} appartement(s) mis à jour suite aux locations expirées`);
+                }
+            });
+        }
+    });
+};
+
+// Fonction pour synchroniser tous les statuts
+const synchronizeAllStatuses = () => {
+    console.log('🔄 Synchronisation des statuts en cours...');
+    
+    // 1. Mettre à jour les locations expirées
+    updateExpiredLocations();
+    
+    // 2. Synchroniser tous les statuts des appartements
+    const syncApartmentQuery = `
+        UPDATE appartements a
+        SET statut = CASE 
+            WHEN EXISTS (
+                SELECT 1 FROM locations l 
+                WHERE l.appartement_id = a.id AND l.statut = 'active'
+            ) THEN 'occupé'
+            WHEN a.statut = 'en_travaux' THEN 'en_travaux'
+            ELSE 'libre'
+        END
+    `;
+    
+    db.query(syncApartmentQuery, (err, result) => {
+        if (err) {
+            console.error('Erreur synchronisation appartements:', err);
+        } else {
+            console.log(`✅ Synchronisation terminée - ${result.affectedRows} appartement(s) mis à jour`);
+        }
+    });
+};
+
+// Exécuter la synchronisation toutes les heures
+setInterval(synchronizeAllStatuses, 60 * 60 * 1000); // 1 heure
+
+// Exécuter la synchronisation au démarrage
+setTimeout(() => {
+    console.log('🚀 Première synchronisation des statuts...');
+    synchronizeAllStatuses();
+}, 5000); // Attendre 5s après le démarrage
+
+
+app.listen(PORT, () => {
+    console.log(`🚀 Serveur démarré sur http://localhost:${PORT}`);
+    console.log(`📊 Base de données: gestion-locative`);
+    console.log(`📁 Fichiers uploadés dans: ./uploads/`);
+    console.log(`🌐 Interface web: http://localhost:${PORT}/gestion-locative`);
+    console.log(`🔐 Authentification activée avec JWT`);
+    console.log(`✨ Nouvelles fonctionnalités de gestion des locations activées`);
+    console.log('');
+    console.log('🏠 Nouvelles routes locations disponibles:');
+    console.log('   GET    /tenants/:id/locations - Toutes les locations d\'un locataire');
+    console.log('   GET    /locations/:id - Détails d\'une location');
+    console.log('   PUT    /locations/:id - Modifier une location');
+    console.log('   DELETE /locations/:id - Supprimer une location');
+    console.log('   PUT    /locations/:id/terminate - Terminer une location');
+    console.log('   GET    /locations/stats - Statistiques des locations');
+    console.log('   GET    /apartments/:id/availability - Vérifier disponibilité');
+});
+
+// Gestion propre de l'arrêt du serveur
+process.on('SIGINT', () => {
+    console.log('\n⏹️  Arrêt du serveur...');
+    db.end(() => {
+        console.log('🔌 Connexion à la base de données fermée');
+        process.exit(0);
+    });
+});
+
+process.on('SIGTERM', () => {
+    console.log('\n⏹️  Arrêt du serveur...');
+    db.end(() => {
+        console.log('🔌 Connexion à la base de données fermée');
+        process.exit(0);
+    });
+});
+
+module.exports = app;
