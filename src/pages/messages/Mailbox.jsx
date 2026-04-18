@@ -497,7 +497,7 @@ export default function Mailbox() {
   const unreadByProperty = groups.reduce((acc, [, g]) => acc + g.unread, 0)
 
   return (
-    <div className="h-[calc(100vh-4rem)] w-full flex flex-col md:flex-row font-sans overflow-hidden bg-slate-950">
+    <div className="h-[calc(100dvh-3.5rem)] lg:h-[100dvh] w-full flex flex-col md:flex-row font-sans overflow-hidden bg-slate-950">
 
       {/* ── SIDEBAR (Col 1) ── */}
       <div className={`w-full md:w-64 bg-slate-900 border-r border-slate-800 flex-col flex-shrink-0 z-20 ${selectedEmail ? 'hidden md:flex' : 'flex'}`}>
