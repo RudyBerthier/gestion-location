@@ -1,0 +1,7 @@
+{
+  "name": "gestion-locative-server",
+  "version": "2.0.0",
+  "type": "module",
+  "main": "server.js",
+  "description": "Serveur Express pour Gestion Locative V2"
+}

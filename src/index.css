@@ -1,0 +1,272 @@
+/* ── Termina — titres ───────────────────────────────────────── */
+@font-face {
+  font-family: 'Termina';
+  src: url('/fonts/Termina/TerminaTest-Regular.otf') format('opentype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Termina';
+  src: url('/fonts/Termina/TerminaTest-Demi.otf') format('opentype');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Termina';
+  src: url('/fonts/Termina/TerminaTest-Bold.otf') format('opentype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Termina';
+  src: url('/fonts/Termina/TerminaTest-Heavy.otf') format('opentype');
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Termina';
+  src: url('/fonts/Termina/TerminaTest-Black.otf') format('opentype');
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    font-size: 16px;
+  }
+
+  body {
+    font-family: 'Epilogue', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: 'Termina', 'Epilogue', system-ui, sans-serif;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+
+  button,
+  a,
+  [role="button"],
+  input[type="button"],
+  input[type="submit"],
+  select {
+    cursor: pointer !important;
+  }
+
+  input,
+  textarea,
+  select {
+    font-family: 'Epilogue', system-ui, sans-serif;
+    font-size: inherit;
+  }
+
+  /* Override the ugly native select arrow across all browsers */
+  select {
+    -webkit-appearance: none;
+    appearance: none;
+    background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpath d='m6 9 6 6 6-6'/%3e%3c/svg%3e");
+    background-repeat: no-repeat;
+    background-position: right 1rem center;
+    background-size: 1.2em;
+    padding-right: 2.75rem !important;
+  }
+  
+  select:focus {
+    outline: none;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #0f172a;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #334155;
+    border-radius: 9999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #64748b;
+  }
+}
+
+/* ─── Fix Lucide icons vertical alignment in flex ───────────────── */
+.flex>svg.lucide,
+.inline-flex>svg.lucide {
+  margin-bottom: 0 !important;
+}
+
+/* ─── Leaflet popup (dark) ───────────────────────────────────── */
+.leaflet-popup-content-wrapper {
+  background-color: #0f172a !important;
+  border: 1px solid #1e293b !important;
+  color: white !important;
+  border-radius: 1rem !important;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5) !important;
+  overflow: hidden;
+  padding: 0 !important;
+}
+
+.leaflet-popup-tip {
+  background-color: #1e293b !important;
+}
+
+.leaflet-popup-content {
+  margin: 0 !important;
+  width: 100% !important;
+}
+
+.leaflet-container a.leaflet-popup-close-button {
+  color: #94a3b8 !important;
+  padding: 8px 8px 0 0 !important;
+  z-index: 10;
+}
+
+.leaflet-container a.leaflet-popup-close-button:hover {
+  color: white !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   MODE CLAIR — override des CSS custom properties Tailwind v4
+   Toutes les couleurs slate-* sont var(--color-slate-*),
+   remapper ici suffit à thémeriser TOUS les composants.
+═══════════════════════════════════════════════════════════════ */
+html.light {
+  color-scheme: light;
+
+  --color-slate-950: #f1f5f9;
+  --color-slate-900: #ffffff;
+  --color-slate-800: #e2e8f0;
+  --color-slate-700: #cbd5e1;
+  --color-slate-600: #94a3b8;
+  --color-slate-500: #64748b;
+  --color-slate-400: #475569;
+  --color-slate-300: #334155;
+  --color-slate-200: #1e293b;
+  --color-slate-100: #0f172a;
+  --color-slate-50: #020817;
+}
+
+/* text-white → texte sombre en light mode.
+   Exception : boutons gradient (from-*) ou boutons violets pleins (bg-violet-600) gardent le texte blanc */
+html.light .text-white:not([class*="from-"]):not(.bg-violet-600) {
+  color: #0f172a;
+}
+
+/* hover:text-white en light mode — même logique.
+   Tailwind génère `color: white` littéralement (pas une variable CSS),
+   donc on doit aussi capturer la classe hover: */
+html.light .hover\:text-white:hover:not([class*="from-"]):not(.bg-violet-600) {
+  color: #0f172a !important;
+}
+
+/* Hover nav item en light mode : hover:text-violet-300 reste lisible */
+html.light .hover\:text-violet-300:hover {
+  color: #7c3aed;
+}
+
+/* Borders & backgrounds exprimés en opacity blanche → adapter pour light mode */
+html.light .border-white\/5 {
+  border-color: rgba(15, 23, 42, 0.08) !important;
+}
+
+html.light .border-white\/10 {
+  border-color: rgba(15, 23, 42, 0.12) !important;
+}
+
+/* bg-white/5 — hover sidebar en light mode : fond slate visible */
+html.light .hover\:bg-white\/5:hover {
+  background-color: rgba(99, 102, 241, 0.1) !important;
+  /* teinté violet léger */
+}
+
+html.light .bg-white\/5 {
+  background-color: rgba(15, 23, 42, 0.05) !important;
+}
+
+html.light .bg-white\/10 {
+  background-color: rgba(15, 23, 42, 0.08) !important;
+}
+
+/* Sidebar active (bg-violet-600 solid) — fonctionne bien en dark ET light */
+/* Sidebar hover (hover:bg-slate-800) → mappé en #e2e8f0 en light, bien visible */
+
+html.light .bg-violet-500\/20 {
+  background-color: rgba(109, 40, 217, 0.1) !important;
+}
+
+html.light .border-violet-500\/20 {
+  border-color: rgba(109, 40, 217, 0.3) !important;
+}
+
+html.light .text-violet-300 {
+  color: #5b21b6 !important;
+}
+
+html.light .text-violet-400 {
+  color: #6d28d9 !important;
+}
+
+/* Cards en light mode */
+html.light .ring-slate-800 {
+  --tw-ring-color: rgba(15, 23, 42, 0.1) !important;
+}
+
+html.light .border-slate-700\/50 {
+  border-color: rgba(15, 23, 42, 0.12) !important;
+}
+
+/* Scrollbar light mode */
+html.light ::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+html.light ::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+}
+
+html.light ::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Leaflet popup en mode clair */
+html.light .leaflet-popup-content-wrapper {
+  background-color: #ffffff !important;
+  border: 1px solid #e2e8f0 !important;
+  color: #0f172a !important;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1) !important;
+}
+
+html.light .leaflet-popup-tip {
+  background-color: #e2e8f0 !important;
+}
+
+html.light .leaflet-container a.leaflet-popup-close-button {
+  color: #64748b !important;
+}
+
+html.light .leaflet-container a.leaflet-popup-close-button:hover {
+  color: #0f172a !important;
+}
