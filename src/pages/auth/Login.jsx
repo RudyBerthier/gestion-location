@@ -87,12 +87,12 @@ function StepPassword({ onSuccess }) {
   const handlePasskeyLogin = async () => {
     setError('')
     try {
-      const { data, error: authError } = await supabase.auth.passkey.authenticate()
+      const { data, error: authError } = await supabase.auth.signInWithPasskey()
       if (authError) throw authError
       navigate('/dashboard')
     } catch (err) {
       console.error('Passkey login error:', err)
-      setError("Échec de la connexion biométrique. L'appareil n'est pas enregistré ou les Passkeys ne sont pas activés.")
+      setError("Échec de la connexion biométrique. L'appareil n'est pas enregistré ou n'est pas reconnu.")
     }
   }
 
