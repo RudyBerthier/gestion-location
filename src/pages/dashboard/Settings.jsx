@@ -313,12 +313,32 @@ export default function Settings() {
   const handleRegisterPasskey = async () => {
     setSaving(true)
     try {
-      const { data, error } = await supabase.auth.passkey.register()
-      if (error) throw error
+      // 1. Démarrer l'enregistrement et récupérer les options
+      const { data: options, error: startError } = await supabase.auth.passkey.startRegistration()
+      if (startError) throw startError
+
+      // 2. Lancer la cérémonie WebAuthn dans le navigateur
+      let credential;
+      try {
+        const { startRegistration } = await import('@simplewebauthn/browser')
+        credential = await startRegistration({ optionsJSON: options.publicKey || options })
+      } catch (err) {
+        console.warn("Fallback vers navigator.credentials", err)
+        credential = await navigator.credentials.create({ publicKey: options.publicKey || options })
+      }
+
+      // 3. Vérifier l'enregistrement côté Supabase
+      const { error: verifyError } = await supabase.auth.passkey.verifyRegistration({
+        challengeId: options.challenge_id || options.challengeId || options.id,
+        credentialResponse: credential,
+        credential: credential // Support pour différentes versions de l'API Supabase
+      })
+      if (verifyError) throw verifyError
+
       toast('Appareil enregistré avec succès pour Face ID / Touch ID !', 'success')
     } catch (err) {
       console.error('Passkey register error:', err)
-      toast("Erreur lors de l'enregistrement de l'appareil. Vérifiez que les Passkeys sont activés dans Supabase.", 'error')
+      toast("Erreur lors de l'enregistrement de l'appareil: " + (err.message || 'Vérifiez Supabase.'), 'error')
     } finally {
       setSaving(false)
     }
