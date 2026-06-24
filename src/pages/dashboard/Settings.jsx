@@ -3,7 +3,7 @@ import SignatureCanvas from 'react-signature-canvas'
 import Cropper from 'react-easy-crop'
 import { useAuth } from '../../contexts/AuthContext'
 import { auth, storage, profiles } from '../../services/api'
-import { Save, Eraser, Loader2, User as UserIcon, Shield, Bell, PenTool, Image as ImageIcon, CheckCircle2, RotateCw, Check, X, Lock, Eye, EyeOff, LogOut, AlertTriangle, Fingerprint } from 'lucide-react'
+import { Save, Eraser, Loader2, User as UserIcon, Shield, Bell, PenTool, Image as ImageIcon, CheckCircle2, RotateCw, Check, X, Lock, Eye, EyeOff, LogOut, AlertTriangle, Fingerprint, Trash2 } from 'lucide-react'
 import { useToast } from '../../contexts/ToastContext'
 import { supabase } from '../../services/supabase'
 
@@ -90,6 +90,40 @@ export default function Settings() {
   
   // -- Sécurité State
   const [twoFactorEnabled, setTwoFactorEnabled] = useState(true)
+  const [passkeys, setPasskeys] = useState([])
+  const [loadingPasskeys, setLoadingPasskeys] = useState(false)
+
+  const loadPasskeys = async () => {
+    setLoadingPasskeys(true)
+    try {
+      const { data, error } = await supabase.auth.passkey.list()
+      if (error) throw error
+      setPasskeys(Array.isArray(data) ? data : data?.data || [])
+    } catch(err) {
+      console.error("Erreur chargement passkeys:", err)
+    } finally {
+      setLoadingPasskeys(false)
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab === 'securite') {
+      loadPasskeys()
+    }
+  }, [activeTab])
+
+  const handleDeletePasskey = async (id) => {
+    if (!window.confirm('Voulez-vous vraiment supprimer cet appareil ? Vous ne pourrez plus vous connecter avec Face ID / Touch ID via cet appareil.')) return
+    try {
+      const { error } = await supabase.auth.passkey.delete({ passkeyId: id })
+      if (error) throw error
+      toast('Appareil supprimé.', 'success')
+      loadPasskeys()
+    } catch(err) {
+      console.error(err)
+      toast('Erreur lors de la suppression.', 'error')
+    }
+  }
 
   // -- Signature State
   const sigCanvas = useRef({})
@@ -333,6 +367,7 @@ export default function Settings() {
       if (verifyError) throw verifyError
 
       toast('Appareil enregistré avec succès pour Face ID / Touch ID !', 'success')
+      loadPasskeys()
     } catch (err) {
       console.error('Passkey register error:', err)
       toast("Erreur lors de l'enregistrement de l'appareil: " + (err.message || 'Vérifiez Supabase.'), 'error')
@@ -598,9 +633,35 @@ export default function Settings() {
                    </div>
                    <button onClick={handleRegisterPasskey} disabled={saving} className="flex items-center justify-center gap-2 px-5 py-2.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl font-medium text-sm transition disabled:opacity-50 flex-shrink-0 shadow-lg shadow-violet-600/20">
                      {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Fingerprint className="w-4 h-4" />}
-                     Enregistrer cet appareil
+                     Ajouter un appareil
                    </button>
                  </div>
+
+                 {loadingPasskeys ? (
+                   <div className="mt-6 flex items-center justify-center py-4">
+                     <Loader2 className="w-6 h-6 animate-spin text-slate-500" />
+                   </div>
+                 ) : passkeys.length > 0 ? (
+                   <div className="mt-6 space-y-3">
+                     <h5 className="text-sm font-semibold text-slate-300 border-b border-slate-700 pb-2">Appareils enregistrés</h5>
+                     {passkeys.map(pk => (
+                       <div key={pk.id} className="flex items-center justify-between bg-slate-900/50 border border-slate-700/50 rounded-xl p-4">
+                         <div className="flex items-center gap-3">
+                           <div className="w-8 h-8 rounded-full bg-emerald-500/10 flex items-center justify-center">
+                             <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                           </div>
+                           <div>
+                             <p className="text-sm font-medium text-white">{pk.name || 'Appareil enregistré'}</p>
+                             <p className="text-xs text-slate-500">Ajouté le {new Date(pk.created_at).toLocaleDateString()}</p>
+                           </div>
+                         </div>
+                         <button onClick={() => handleDeletePasskey(pk.id)} className="p-2 text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition" title="Supprimer">
+                           <Trash2 className="w-4 h-4" />
+                         </button>
+                       </div>
+                     ))}
+                   </div>
+                 ) : null}
                </div>
 
                {/* Déconnexion */}
