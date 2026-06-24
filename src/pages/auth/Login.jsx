@@ -4,7 +4,7 @@ import { useForm } from 'react-hook-form'
 import { z } from 'zod'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { supabase } from '../../services/supabase'
-import { Building2, Mail, Lock, Eye, EyeOff, Loader2, ArrowLeft, RefreshCw } from 'lucide-react'
+import { Building2, Mail, Lock, Eye, EyeOff, Loader2, ArrowLeft, RefreshCw, Fingerprint } from 'lucide-react'
 import axios from 'axios'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
@@ -84,6 +84,18 @@ function StepPassword({ onSuccess }) {
     })
   }
 
+  const handlePasskeyLogin = async () => {
+    setError('')
+    try {
+      const { data, error: authError } = await supabase.auth.passkey.authenticate()
+      if (authError) throw authError
+      navigate('/dashboard')
+    } catch (err) {
+      console.error('Passkey login error:', err)
+      setError("Échec de la connexion biométrique. L'appareil n'est pas enregistré ou les Passkeys ne sont pas activés.")
+    }
+  }
+
   return (
     <>
       <h2 className="text-xl font-semibold text-white mb-6">Connexion</h2>
@@ -107,6 +119,16 @@ function StepPassword({ onSuccess }) {
           <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
         </svg>
         Continuer avec Google
+      </button>
+
+      {/* Bouton Passkey (Face ID / Touch ID) */}
+      <button
+        type="button"
+        onClick={handlePasskeyLogin}
+        className="w-full flex items-center justify-center gap-3 py-2.5 px-4 bg-violet-600 hover:bg-violet-500 border border-violet-500/50 text-white font-medium rounded-xl transition-all duration-200 mb-4 shadow-lg shadow-violet-600/20"
+      >
+        <Fingerprint className="w-5 h-5" />
+        Continuer avec Face ID / Touch ID
       </button>
 
       <div className="flex items-center gap-3 mb-4">

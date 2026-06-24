@@ -9,6 +9,9 @@ if (!supabaseUrl || !supabaseAnonKey) {
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
+    experimental: {
+      passkey: true
+    },
     // Persistance dans localStorage → survit aux rechargements ET aux redémarrages serveur
     storage: window.localStorage,
     persistSession: true,

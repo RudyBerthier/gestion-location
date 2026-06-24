@@ -64,7 +64,11 @@ app.get('/api/health', (req, res) => {
 // ============================================================
 // DÉMARRAGE
 // ============================================================
-app.listen(PORT, () => {
+import http from 'http'
+
+const server = http.createServer(app)
+
+server.listen(PORT, () => {
   console.log(`🚀 Serveur Gestion-Locative V2 lancé sur http://localhost:${PORT}`)
   console.log(`📧 Resend : ${process.env.RESEND_API_KEY ? '✅ configuré' : '⚠️  non configuré'}`)
   console.log(`🗄️  Supabase : ${process.env.SUPABASE_URL ? '✅ configuré' : '⚠️  non configuré'}`)

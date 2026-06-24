@@ -30,7 +30,7 @@ export const profiles = {
 // ============================================================
 export const appartements = {
   getAll: () => supabase.from('appartements').select(`*, medias(*)`).order('created_at', { ascending: false }),
-  getById: (id) => supabase.from('appartements').select(`*, medias(*), locations(*, locataires(*))`).eq('id', id).single(),
+  getById: (id) => supabase.from('appartements').select(`*, medias(*), locations(*, locataires(*), paiements(*)), documents(*), incidents(*)`).eq('id', id).single(),
   create: (data) => supabase.from('appartements').insert(data).select().single(),
   update: (id, data) => supabase.from('appartements').update(data).eq('id', id).select().single(),
   delete: (id) => supabase.from('appartements').delete().eq('id', id),
@@ -268,4 +268,15 @@ export const etatsLieux = {
     return res.data
   },
   generatePdfUrl: (id) => `${API_URL}/api/etats-des-lieux/${id}/generate-pdf`,
+}
+
+// ============================================================
+// INCIDENTS / TRAVAUX
+// ============================================================
+export const incidents = {
+  getAll: () => supabase.from('incidents').select('*, appartements(titre), contacts(nom)').order('date_signalement', { ascending: false }),
+  getById: (id) => supabase.from('incidents').select('*, appartements(titre), contacts(*)').eq('id', id).single(),
+  create: (data) => supabase.from('incidents').insert(data).select().single(),
+  update: (id, data) => supabase.from('incidents').update(data).eq('id', id).select().single(),
+  delete: (id) => supabase.from('incidents').delete().eq('id', id),
 }

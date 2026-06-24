@@ -3,7 +3,7 @@ import SignatureCanvas from 'react-signature-canvas'
 import Cropper from 'react-easy-crop'
 import { useAuth } from '../../contexts/AuthContext'
 import { auth, storage, profiles } from '../../services/api'
-import { Save, Eraser, Loader2, User as UserIcon, Shield, Bell, PenTool, Image as ImageIcon, CheckCircle2, RotateCw, Check, X, Lock, Eye, EyeOff, LogOut, AlertTriangle } from 'lucide-react'
+import { Save, Eraser, Loader2, User as UserIcon, Shield, Bell, PenTool, Image as ImageIcon, CheckCircle2, RotateCw, Check, X, Lock, Eye, EyeOff, LogOut, AlertTriangle, Fingerprint } from 'lucide-react'
 import { useToast } from '../../contexts/ToastContext'
 import { supabase } from '../../services/supabase'
 
@@ -310,6 +310,20 @@ export default function Settings() {
     window.location.href = '/login'
   }
 
+  const handleRegisterPasskey = async () => {
+    setSaving(true)
+    try {
+      const { data, error } = await supabase.auth.passkey.register()
+      if (error) throw error
+      toast('Appareil enregistré avec succès pour Face ID / Touch ID !', 'success')
+    } catch (err) {
+      console.error('Passkey register error:', err)
+      toast("Erreur lors de l'enregistrement de l'appareil. Vérifiez que les Passkeys sont activés dans Supabase.", 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   // --- RENDER ---
   const TABS = [
     { id: 'profil', label: 'Profil Public', icon: <UserIcon className="w-5 h-5" /> },
@@ -549,6 +563,25 @@ export default function Settings() {
                  <div className="mt-4 flex justify-end">
                    <button onClick={handleSaveProfile} disabled={saving} className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 text-white px-5 py-2 rounded-xl font-medium text-sm transition disabled:opacity-50">
                      {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Sauvegarder
+                   </button>
+                 </div>
+               </div>
+
+               {/* Passkeys / Biométrie */}
+               <div className="bg-slate-800/30 border border-slate-700/50 rounded-2xl p-6">
+                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                   <div className="flex items-center gap-3">
+                     <div className="w-9 h-9 rounded-xl bg-violet-500/10 flex items-center justify-center flex-shrink-0">
+                       <Fingerprint className="w-4 h-4 text-violet-400" />
+                     </div>
+                     <div>
+                       <h4 className="text-base font-bold text-white">Authentification Biométrique (Passkeys)</h4>
+                       <p className="text-sm text-slate-400 mt-0.5 max-w-md">Connectez-vous rapidement et en toute sécurité avec Face ID, Touch ID ou Windows Hello.</p>
+                     </div>
+                   </div>
+                   <button onClick={handleRegisterPasskey} disabled={saving} className="flex items-center justify-center gap-2 px-5 py-2.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl font-medium text-sm transition disabled:opacity-50 flex-shrink-0 shadow-lg shadow-violet-600/20">
+                     {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Fingerprint className="w-4 h-4" />}
+                     Enregistrer cet appareil
                    </button>
                  </div>
                </div>
