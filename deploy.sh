@@ -29,7 +29,7 @@ echo ""
 echo "📦 Push GitHub..."
 git add .
 git commit -m "$MSG" 2>/dev/null || echo "   (rien à committer)"
-git push origin main:simple
+git push origin main:main
 echo "   ✅ GitHub OK"
 echo ""
 
@@ -49,7 +49,7 @@ ssh -i "$KEY" "$SERVER" << 'ENDSSH'
   cd /var/www/gestion-locative
 
   echo "  → git pull (backend)..."
-  git pull origin simple
+  git pull origin main
 
   echo "  → npm install..."
   npm install --silent
