@@ -317,21 +317,18 @@ export default function Settings() {
       const { data: options, error: startError } = await supabase.auth.passkey.startRegistration()
       if (startError) throw startError
 
-      // 2. Lancer la cérémonie WebAuthn dans le navigateur
-      let credential;
-      try {
-        const { startRegistration } = await import('@simplewebauthn/browser')
-        credential = await startRegistration({ optionsJSON: options.publicKey || options })
-      } catch (err) {
-        console.warn("Fallback vers navigator.credentials", err)
-        credential = await navigator.credentials.create({ publicKey: options.publicKey || options })
-      }
+      // 2. Lancer la cérémonie WebAuthn dans le navigateur avec simplewebauthn (qui gère la conversion JSON <-> ArrayBuffer)
+      const { startRegistration } = await import('@simplewebauthn/browser')
+      
+      // Supabase renvoie généralement { challenge_id, options: { ... } }
+      const webauthnOptions = options?.options || options;
+      
+      const credential = await startRegistration({ optionsJSON: webauthnOptions })
 
       // 3. Vérifier l'enregistrement côté Supabase
       const { error: verifyError } = await supabase.auth.passkey.verifyRegistration({
         challengeId: options.challenge_id || options.challengeId || options.id,
-        credentialResponse: credential,
-        credential: credential // Support pour différentes versions de l'API Supabase
+        credential: credential
       })
       if (verifyError) throw verifyError
 
